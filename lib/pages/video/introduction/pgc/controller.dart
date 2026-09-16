@@ -45,6 +45,15 @@ class PgcIntroController extends CommonIntroController {
   late final bool isPgc;
   late final PgcInfoModel pgcItem;
 
+  /// 是否正在进入应用内小窗
+  bool isEnteringPip = false;
+
+  @override
+  void onClose() {
+    if (isEnteringPip) return;
+    super.onClose();
+  }
+
   @override
   (Object, int) get getFavRidType => (epId!, 24);
 

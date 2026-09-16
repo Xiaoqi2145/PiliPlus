@@ -24,6 +24,8 @@ import 'package:PiliPlus/pages/video/introduction/ugc/widgets/action_item.dart';
 import 'package:PiliPlus/pages/video/widgets/header_control.dart'
     show HeaderControlState;
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
+import 'package:PiliPlus/services/live_pip_overlay_service.dart';
+import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
@@ -85,6 +87,26 @@ class _AudioPageState extends State<AudioPage> {
     AudioController(),
     tag: Utils.generateRandomString(8),
   );
+
+  @override
+  void initState() {
+    super.initState();
+    // 进入听视频界面时，确保关闭所有应用内小窗
+    if (PipOverlayService.isInPipMode) {
+      PipOverlayService.stopPip(
+        callOnClose: false,
+        immediate: true,
+        releaseSavedOwner: true,
+        // 小窗 owner 的视频页仍在栈内时只暂停不 dispose，避免破坏其计数
+        disposeSavedOwnerPlayer: VideoStackManager.getCount() == 0,
+      );
+    }
+    if (LivePipOverlayService.isInPipMode) {
+      // 旧直播 controller 就此退休，关闭其弹幕流/计时器/通知条目防泄漏
+      LivePipOverlayService.cleanupSavedController();
+      LivePipOverlayService.stopLivePip(callOnClose: false);
+    }
+  }
 
   @override
   void didChangeDependencies() {

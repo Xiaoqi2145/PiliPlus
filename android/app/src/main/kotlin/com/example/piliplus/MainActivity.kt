@@ -6,8 +6,24 @@ import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager.LayoutParams
 import com.ryanheise.audioservice.AudioServiceActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : AudioServiceActivity() {
+    private lateinit var methodChannel: MethodChannel
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        // 通道名需与 Dart 侧 Utils.channel（Constants.appName）保持一致
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "PiliPlus")
+        methodChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                else -> result.notImplemented()
+            }
+        }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (AndroidHelper.isFoldable) {
@@ -36,5 +52,8 @@ class MainActivity : AudioServiceActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration?) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         AndroidHelper.isPipMode = isInPictureInPictureMode
+        if (::methodChannel.isInitialized) {
+            methodChannel.invokeMethod("onPipChanged", isInPictureInPictureMode)
+        }
     }
 }

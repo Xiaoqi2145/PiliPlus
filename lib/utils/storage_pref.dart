@@ -250,7 +250,7 @@ abstract final class Pref {
     if (codecs is List) {
       return codecs.map((i) => VideoDecodeFormatType.values.byName(i)).toList();
     }
-    return const <VideoDecodeFormatType>[.AVC, .AV1];
+    return const <VideoDecodeFormatType>[.AVC];
   }
 
   static List<VideoDecodeFormatType> get preferCodecsCellular {
@@ -269,7 +269,7 @@ abstract final class Pref {
   );
 
   static String get videoSync =>
-      _setting.get(SettingBoxKey.videoSync, defaultValue: 'display-resample');
+      _setting.get(SettingBoxKey.videoSync, defaultValue: 'audio');
 
   static String get autosync => _setting.get(
     SettingBoxKey.autosync,
@@ -779,6 +779,12 @@ abstract final class Pref {
   static bool get autoPiP =>
       _setting.get(SettingBoxKey.autoPiP, defaultValue: false);
 
+  static bool get enableInAppPip =>
+      _setting.get(SettingBoxKey.enableInAppPip, defaultValue: true);
+
+  static bool get enableInAppPipToSystemPip =>
+      _setting.get(SettingBoxKey.enableInAppPipToSystemPip, defaultValue: true);
+
   static bool get enableSponsorBlock =>
       _setting.get(SettingBoxKey.enableSponsorBlock, defaultValue: false);
 
@@ -823,10 +829,10 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.enableLongShowControl, defaultValue: false);
 
   static double get bufferSize =>
-      _setting.get(SettingBoxKey.bufferSize, defaultValue: 4.0);
+      _setting.get(SettingBoxKey.bufferSize, defaultValue: 16.0);
 
   static double get bufferSec =>
-      _setting.get(SettingBoxKey.bufferSec, defaultValue: 16.0);
+      _setting.get(SettingBoxKey.bufferSec, defaultValue: 30.0);
 
   static Map<String, String> initBuffer([double playbackSpeed = 1.0]) {
     final bufSec = Pref.bufferSec * playbackSpeed;

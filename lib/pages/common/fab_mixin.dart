@@ -5,6 +5,9 @@ mixin BaseFabMixin<T extends StatefulWidget> on State<T>, TickerProvider {
   AnimationController get fabAnimationCtr;
   Animation<Offset> get fabAnimation;
 
+  /// 是否正在进入应用内小窗（进入时保留资源，不隐藏/清理）
+  bool isEnteringPip = false;
+
   AnimationController _initController() {
     return AnimationController(
       vsync: this,

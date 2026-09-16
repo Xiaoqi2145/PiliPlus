@@ -23,6 +23,9 @@ class VideoReplyController extends ReplyController<MainListReply>
   final String heroTag;
   late final videoCtr = Get.find<VideoDetailController>(tag: heroTag);
 
+  /// 是否正在进入应用内小窗
+  bool isEnteringPip = false;
+
   @override
   dynamic get sourceId => IdUtils.av2bv(aid);
 
@@ -39,4 +42,11 @@ class VideoReplyController extends ReplyController<MainListReply>
     cursorNext: cursorNext,
     offset: paginationReply?.nextOffset,
   );
+
+  @override
+  void onClose() {
+    // 正在进入应用内小窗，保留资源供小窗返回后续用
+    if (isEnteringPip) return;
+    super.onClose();
+  }
 }

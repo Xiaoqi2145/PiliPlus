@@ -17,6 +17,7 @@ class BottomControl extends StatelessWidget {
     required this.controller,
     required this.buildBottomControl,
     required this.videoDetailController,
+    this.isPipMode = false,
   });
 
   final double maxWidth;
@@ -24,6 +25,9 @@ class BottomControl extends StatelessWidget {
   final PlPlayerController controller;
   final ValueGetter<Widget> buildBottomControl;
   final VideoDetailController videoDetailController;
+
+  /// 应用内小窗：空间极小，隐藏进度条上的附加信息层
+  final bool isPipMode;
 
   void onDragStart(ThumbDragDetails duration) {
     feedBack();
@@ -95,7 +99,8 @@ class BottomControl extends StatelessWidget {
                           segments: videoDetailController.segmentProgressList,
                         ),
                       ),
-                    if (controller.showViewPoints &&
+                    if (!isPipMode &&
+                        controller.showViewPoints &&
                         videoDetailController.viewPointList.isNotEmpty &&
                         videoDetailController.showVP.value)
                       Padding(
@@ -108,7 +113,8 @@ class BottomControl extends StatelessWidget {
                               : null,
                         ),
                       ),
-                    if (videoDetailController.showDmTrendChart.value)
+                    if (!isPipMode &&
+                        videoDetailController.showDmTrendChart.value)
                       if (videoDetailController.dmTrend.value?.dataOrNull
                           case final list?)
                         buildDmChart(primary, list, videoDetailController, 4.5),

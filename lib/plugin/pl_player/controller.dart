@@ -28,6 +28,8 @@ import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/services/live_pip_overlay_service.dart';
+import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
@@ -120,6 +122,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   final RxBool controlsLock = false.obs;
 
   final RxBool isFullScreen = false.obs;
+  // 系统原生 PiP 状态（由原生侧 onPipChanged 推送）
+  final RxBool isNativePip = false.obs;
   bool isLive = false;
 
   bool _isVertical = false;
@@ -196,6 +200,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   late final bool autoPiP = Pref.autoPiP;
   bool get isPipMode =>
+      isNativePip.value ||
       (Platform.isAndroid && AndroidHelper.isPipMode) ||
       (PlatformUtils.isDesktop && isDesktopPip);
   late bool isDesktopPip = false;
@@ -282,6 +287,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return routeName == '/videoV' || routeName == '/liveRoom';
   }
 
+  /// 是否存在应用内小窗（视频页或直播页）
+  bool get _isInInAppPip {
+    return PipOverlayService.isInPipMode || LivePipOverlayService.isInPipMode;
+  }
+
   void enterPip({bool autoEnter = false}) {
     if (videoPlayerController case NativePlayer(:final state)) {
       PageUtils.enterPip(
@@ -293,6 +303,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       );
     }
   }
+
+  /// 供外部（小窗服务）主动切断 Auto-Enter PiP
+  void disableAutoEnterPip() => _disableAutoEnterPip();
 
   void _disableAutoEnterPip() {
     if (_isAutoEnterPip) {
@@ -547,18 +560,35 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       enableHeart = false;
     }
 
-    if (Platform.isAndroid && autoPiP) {
-      if (DeviceUtils.sdkInt < 31) {
-        AndroidHelper$ToDart.onUserLeaveHint = Runnable.implement(
-          $Runnable(run: _onUserLeaveHint),
-        );
-      } else {
-        _isAutoEnterPip = true;
+    if (Platform.isAndroid) {
+      // 原生侧 PiP 状态变化推送，用于同步应用内小窗与系统 PiP
+      Utils.channel.setMethodCallHandler((call) async {
+        if (call.method == 'onPipChanged') {
+          final bool isInPip = call.arguments as bool;
+          isNativePip.value = isInPip;
+          PipOverlayService.isNativePip = isInPip;
+          LivePipOverlayService.isNativePip = isInPip;
+        }
+      });
+
+      if (autoPiP) {
+        if (DeviceUtils.sdkInt < 31) {
+          AndroidHelper$ToDart.onUserLeaveHint = Runnable.implement(
+            $Runnable(run: _onUserLeaveHint),
+          );
+        } else {
+          _isAutoEnterPip = true;
+        }
       }
     }
   }
 
   void _onUserLeaveHint() {
+    // 应用内小窗存在时，系统 PiP 交由小窗服务接管
+    if (_isInInAppPip) {
+      enterPip();
+      return;
+    }
     if (playerStatus.isPlaying && _isCurrVideoPage) {
       enterPip();
     }
@@ -889,7 +919,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           WakelockPlus.enable();
 
           if (_isAutoEnterPip) {
-            if (_isCurrVideoPage) {
+            if (_isCurrVideoPage || _isInInAppPip) {
               enterPip(autoEnter: true);
             } else {
               _disableAutoEnterPip();
@@ -1696,9 +1726,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  void onPopInvokedWithResult(bool didPop, Object? result) {
+  void onPopInvokedWithResult(
+    bool didPop,
+    Object? result, {
+    /// 正在进入应用内小窗时传 false：退出页面不应暂停播放
+    bool pauseOnPop = true,
+  }) {
     if (didPop) {
-      if (playerStatus.isPlaying) {
+      if (pauseOnPop && playerStatus.isPlaying) {
         pause();
       }
 

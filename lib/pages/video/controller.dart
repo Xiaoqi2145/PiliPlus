@@ -52,6 +52,7 @@ import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
+import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
@@ -123,6 +124,9 @@ class VideoDetailController extends GetxController
 
   final videoPlayerKey = GlobalKey();
   final childKey = GlobalKey<MiniScaffoldState>();
+
+  /// 是否正在进入应用内小窗
+  bool isEnteringPip = false;
 
   final plPlayerController = PlPlayerController.getInstance()
     ..brightness.value = -1;
@@ -357,6 +361,24 @@ class VideoDetailController extends GetxController
   void onInit() {
     super.onInit();
     args = Get.arguments;
+
+    // 开启新视频时，如果存在前代播放器的应用内小窗，则按播放上下文决定是否重置旧状态
+    // 避免不同视频/分P之间 SponsorBlock 片段状态污染，同时保留同上下文无缝恢复能力
+    if (PipOverlayService.isInPipMode) {
+      if (kDebugMode) {
+        debugPrint(
+          '[VideoDetailController] Active PiP detected, closing before new video initialization with context-aware reset',
+        );
+      }
+      PipOverlayService.stopPip(
+        immediate: true,
+        targetContextKey: PipOverlayService.contextKeyFromArgs(args),
+      );
+      // 同步清理旧视频的 SponsorBlock 状态，避免污染新视频
+      // 不能放在 stopPip 里异步执行，否则会与新视频初始化竞态
+      resetBlock();
+    }
+
     videoType = args['videoType'];
     if (videoType == VideoType.pgc) {
       if (!isLoginVideo) {
@@ -1246,6 +1268,10 @@ class VideoDetailController extends GetxController
 
   @override
   void onClose() {
+    if (isEnteringPip) {
+      // 正在进入小窗，保留资源
+      return;
+    }
     cid.close();
     if (isFileSource) {
       cacheLocalProgress();
@@ -1296,7 +1322,8 @@ class VideoDetailController extends GetxController
       }
 
       // sponsor block
-      if (blockConfig.enableBlock) {
+      // 小窗恢复时不重置，保留无缝恢复能力
+      if (!PipOverlayService.isInPipMode && blockConfig.enableBlock) {
         resetBlock();
       }
 

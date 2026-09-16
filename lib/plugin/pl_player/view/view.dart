@@ -98,6 +98,8 @@ class PLVideoPlayer extends StatefulWidget {
     this.danmuWidget,
     this.showEpisodes,
     this.showViewPoints,
+    this.isPipMode = false,
+    this.isInAppPip = false,
     this.fill = Colors.black,
     this.alignment = Alignment.center,
     super.key,
@@ -121,6 +123,11 @@ class PLVideoPlayer extends StatefulWidget {
   ])?
   showEpisodes;
   final VoidCallback? showViewPoints;
+  final bool isPipMode;
+
+  /// 应用内小窗（非系统 PiP）。
+  /// 窗口过小时不渲染字幕，避免（尤其是双语）字幕挤占画面。
+  final bool isInAppPip;
   final Color fill;
   final Alignment alignment;
 
@@ -1366,7 +1373,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         if (widget.danmuWidget case final danmaku?)
           Positioned.fill(top: 4, child: danmaku),
 
-        if (!isLive)
+        if (!isLive && !widget.isInAppPip)
           Positioned.fill(
             child: IgnorePointer(
               ignoring: !plPlayerController.enableDragSubtitle,
@@ -1620,6 +1627,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                         BottomControl(
                           maxWidth: maxWidth,
                           isFullScreen: isFullScreen,
+                          isPipMode: widget.isPipMode,
                           controller: plPlayerController,
                           videoDetailController: videoDetailController,
                           buildBottomControl: () => buildBottomControl(
@@ -1755,7 +1763,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                             segments: videoDetailController.segmentProgressList,
                           ),
                         ),
-                      if (plPlayerController.showViewPoints &&
+                      if (!widget.isPipMode &&
+                          plPlayerController.showViewPoints &&
                           videoDetailController.viewPointList.isNotEmpty &&
                           videoDetailController.showVP.value)
                         Padding(
@@ -1776,7 +1785,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                                 : null,
                           ),
                         ),
-                      if (plPlayerController.showDmChart &&
+                      if (!widget.isPipMode &&
+                          plPlayerController.showDmChart &&
                           videoDetailController.showDmTrendChart.value)
                         if (videoDetailController.dmTrend.value?.dataOrNull
                             case final list?)

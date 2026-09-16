@@ -214,6 +214,13 @@ List<SettingsModel> get playSettings => [
       setKey: SettingBoxKey.continuePlayInBackground,
       defaultVal: false,
     ),
+  const SwitchModel(
+    title: '应用内画中画',
+    subtitle: '支持在应用内以小窗形式播放视频',
+    leading: Icon(Icons.picture_in_picture_alt_outlined),
+    setKey: SettingBoxKey.enableInAppPip,
+    defaultVal: true,
+  ),
   if (Platform.isAndroid) ...[
     SwitchModel(
       title: '后台画中画',
@@ -226,6 +233,13 @@ List<SettingsModel> get playSettings => [
           SmartDialog.showToast('建议开启后台音频服务');
         }
       },
+    ),
+    const SwitchModel(
+      title: '应用内小窗转后台画中画（实验性）',
+      subtitle: '实验性功能：应用内小窗存在时，退到后台自动切换为系统 PiP；可能因系统差异出现异常',
+      leading: Icon(Icons.science_outlined),
+      setKey: SettingBoxKey.enableInAppPipToSystemPip,
+      defaultVal: true,
     ),
     const SwitchModel(
       title: '画中画不加载弹幕',

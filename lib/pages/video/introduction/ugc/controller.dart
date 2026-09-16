@@ -57,6 +57,9 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
   late final Rx<RelationData> followStatus = Rx(RelationData());
   late final RxMap staffRelations = {}.obs;
 
+  /// 是否正在进入应用内小窗
+  bool isEnteringPip = false;
+
   // 是否点踩
   final RxBool hasDislike = false.obs;
 
@@ -781,5 +784,12 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       cid.value,
       videoDetail.value.owner?.mid,
     );
+  }
+
+  @override
+  void onClose() {
+    // 正在进入应用内小窗，保留资源供小窗返回后续用
+    if (isEnteringPip) return;
+    super.onClose();
   }
 }

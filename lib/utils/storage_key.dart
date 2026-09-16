@@ -40,6 +40,8 @@ abstract final class SettingBoxKey {
       CDNService = 'CDNService',
       disableAudioCDN = 'disableAudioCDN',
       autoPiP = 'autoPiP',
+      enableInAppPip = 'enableInAppPip',
+      enableInAppPipToSystemPip = 'enableInAppPipToSystemPip',
       enableAutoLongPressSpeed = 'enableAutoLongPressSpeed',
       useRelativeSlide = 'useRelativeSlide',
       sliderDuration = 'sliderOffset',

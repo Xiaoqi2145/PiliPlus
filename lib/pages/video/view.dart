@@ -7,6 +7,7 @@ import 'package:PiliPlus/common/widgets/custom_icon.dart';
 import 'package:PiliPlus/common/widgets/flutter/pop_scope.dart';
 import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
 import 'package:PiliPlus/common/widgets/keep_alive_wrapper.dart';
+import 'package:PiliPlus/common/widgets/pip_mini_video_content.dart';
 import 'package:PiliPlus/common/widgets/route_aware_mixin.dart';
 import 'package:PiliPlus/common/widgets/scaffold/mini_scaffold.dart';
 import 'package:PiliPlus/common/widgets/scaffold/simple_scaffold.dart';
@@ -52,6 +53,9 @@ import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/plugin/pl_player/view/view.dart';
+import 'package:PiliPlus/services/live_pip_overlay_service.dart';
+import 'package:PiliPlus/services/logger.dart';
+import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService;
@@ -67,6 +71,7 @@ import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/theme_utils.dart';
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, clampDouble;
@@ -116,6 +121,251 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
   bool isShowing = true;
 
+  /// 是否正在进入应用内小窗（防止 dispose / didPushNext 清理播放器状态）
+  bool _isEnteringPipMode = false;
+
+  void _logSponsorBlock(String message) {
+    if (!kDebugMode) return;
+    logger.i('[${videoDetailController.hashCode}] [SponsorBlock] $message');
+  }
+
+  /// 小窗相关标志位全部复位。进入/退出小窗的每条路径都必须走到，
+  /// 否则 controller 会误以为还在小窗里而跳过 onClose 清理。
+  void _resetEnteringPipFlags() {
+    _isEnteringPipMode = false;
+    videoDetailController.isEnteringPip = false;
+    if (videoDetailController.showReply) {
+      _videoReplyController.isEnteringPip = false;
+    }
+    if (videoDetailController.isFileSource) {
+      localIntroController.isEnteringPip = false;
+    } else if (videoDetailController.isUgc) {
+      ugcIntroController.isEnteringPip = false;
+    } else {
+      pgcIntroController.isEnteringPip = false;
+    }
+  }
+
+  /// 量取页面播放器当前屏幕矩形，作为小窗收起动画的源矩形。
+  /// pop/push 甫一触发页面尚未移动，全局坐标即所见位置；
+  /// 量取失败返回 null，小窗会无动画直接以活跃态出现。
+  Rect? _playerRect() {
+    final renderObject = videoDetailController.videoPlayerKey.currentContext
+        ?.findRenderObject();
+    if (renderObject is! RenderBox ||
+        !renderObject.attached ||
+        !renderObject.hasSize ||
+        // 占位副本挂载初期是零尺寸 SizedBox.shrink，视为未量到
+        renderObject.size.isEmpty) {
+      return null;
+    }
+    return renderObject.localToGlobal(Offset.zero) & renderObject.size;
+  }
+
+  /// 是否应该进入应用内小窗。任一条件不满足都不进 —— 宁可退回
+  /// "返回时正常暂停"的老行为，也不要误开小窗。
+  bool _shouldStartInAppPip() {
+    _logSponsorBlock(
+      'Checking PiP: count=${VideoStackManager.getCount()}, previousRoute=${Get.previousRoute}',
+    );
+    if (!Pref.enableInAppPip) {
+      _logSponsorBlock('Reject PiP: in-app PiP is disabled in settings');
+      return false;
+    }
+    if (PipOverlayService.isInPipMode) {
+      _logSponsorBlock('Reject PiP: already in PiP mode');
+      return false;
+    }
+    plPlayerController ??= videoDetailController.plPlayerController;
+    final controller = plPlayerController;
+    if (controller == null || controller.videoController == null) {
+      _logSponsorBlock('Reject PiP: controller or videoController is null');
+      return false;
+    }
+    if (controller.isDesktopPip || controller.isPipMode) {
+      _logSponsorBlock(
+        'Reject PiP: isDesktopPip=${controller.isDesktopPip}, isPipMode=${controller.isPipMode}',
+      );
+      return false;
+    }
+    if (controller.playerStatus.value != PlayerStatus.playing) {
+      _logSponsorBlock('Reject PiP: video is paused');
+      return false;
+    }
+    if (!videoDetailController.autoPlay) {
+      _logSponsorBlock('Reject PiP: autoPlay is false');
+      return false;
+    }
+    // 即将进入听视频界面时不开启小窗
+    if (Get.currentRoute == '/audio') {
+      _logSponsorBlock('Reject PiP: navigating to audio page');
+      return false;
+    }
+    final prevRoute = Get.previousRoute;
+    if (VideoStackManager.isReturningToVideo()) {
+      // 返回目标不是视频/直播详情页时才允许开小窗
+      if (!prevRoute.startsWith('/video') &&
+          !prevRoute.startsWith('/liveRoom')) {
+        _logSponsorBlock(
+          'Allowing PiP: returning to non-video page ($prevRoute)',
+        );
+      } else {
+        _logSponsorBlock(
+          'Reject PiP: isReturningToVideo is true (count=${VideoStackManager.getCount()}, previous=$prevRoute)',
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _startInAppPipIfNeeded() {
+    if (!_shouldStartInAppPip()) {
+      return;
+    }
+
+    // 置标志：让 didPushNext / dispose / 各 controller 的 onClose 保留资源
+    _isEnteringPipMode = true;
+    videoDetailController.isEnteringPip = true;
+
+    // 保存所有相关 controller，小窗期间它们的 onClose 会跳过清理
+    final additionalControllers = <String, dynamic>{};
+    if (videoDetailController.showReply) {
+      try {
+        final replyController = Get.find<VideoReplyController>(tag: heroTag);
+        replyController.isEnteringPip = true;
+        additionalControllers['reply'] = replyController;
+      } catch (_) {}
+    }
+    if (videoDetailController.isFileSource) {
+      try {
+        final intro = Get.find<LocalIntroController>(tag: heroTag);
+        intro.isEnteringPip = true;
+        additionalControllers['intro'] = intro;
+      } catch (_) {}
+    } else if (videoDetailController.isUgc) {
+      try {
+        final intro = Get.find<UgcIntroController>(tag: heroTag);
+        intro.isEnteringPip = true;
+        additionalControllers['intro'] = intro;
+      } catch (_) {}
+    } else {
+      try {
+        final intro = Get.find<PgcIntroController>(tag: heroTag);
+        intro.isEnteringPip = true;
+        additionalControllers['intro'] = intro;
+      } catch (_) {}
+    }
+
+    // 收起动画源矩形：pop/push 甫一触发页面尚未移动，全局坐标即所见位置；
+    // 量取失败则为 null，小窗无动画直接以活跃态出现
+    final sourceRect = _playerRect();
+
+    PipOverlayService.startPip(
+      plPlayerController: plPlayerController!,
+      controller: videoDetailController,
+      additionalControllers: additionalControllers,
+      context: context,
+      sourceRect: sourceRect,
+      // 轻量小窗内容：纹理 + 弹幕 + 缓冲指示，不复用完整 PLVideoPlayer，
+      // 小窗副本与页面副本彻底解耦（字幕随之不在小窗显示）
+      videoPlayerBuilder: (isNative, w, h) => PipMiniVideoContent(
+        plPlayerController: plPlayerController!,
+        transition: PipOverlayService.transition,
+        danmuWidget: pipNoDanmaku
+            ? null
+            : Obx(
+                () => PlDanmaku(
+                  key: ValueKey(videoDetailController.cid.value),
+                  isPipMode: true,
+                  cid: videoDetailController.cid.value,
+                  playerController: plPlayerController!,
+                  isFullScreen: false,
+                  isFileSource: videoDetailController.isFileSource,
+                  size: Size(w, h),
+                ),
+              ),
+      ),
+      onClose: () {
+        _isEnteringPipMode = false;
+        _logSponsorBlock('PiP closed by user');
+        _handleInAppPipCloseCleanup();
+      },
+      onTapToReturn: () {
+        // 不取消 position subscription，让它在新页面继续工作
+        _logSponsorBlock('Returning from PiP, preserving positionSubscription');
+        final args = Map<String, dynamic>.from(videoDetailController.args);
+        final progress =
+            plPlayerController?.positionInMilliseconds ??
+            videoDetailController.playedTime?.inMilliseconds;
+        if (progress != null) {
+          args['progress'] = progress;
+        }
+        args['fromPip'] = true;
+
+        _isEnteringPipMode = false;
+        Get.toNamed('/videoV', arguments: args);
+      },
+    );
+
+    _logSponsorBlock('PiP started, positionSubscription preserved');
+  }
+
+  /// 视频页被 pop 时：先尝试进入应用内小窗，再交给播放器处理返回
+  void _onPopInvokedWithResult(bool didPop, Object? result) {
+    final returningToVideoPage =
+        VideoStackManager.getCount() > 1 &&
+        Get.previousRoute.startsWith('/video');
+    if (didPop) {
+      if (Platform.isAndroid) {
+        // 返回时立即清空 Auto-PiP 状态，切断系统自动进入的时机，防止误触
+        plPlayerController?.disableAutoEnterPip();
+      }
+      _startInAppPipIfNeeded();
+    }
+    videoDetailController.plPlayerController.onPopInvokedWithResult(
+      didPop,
+      result,
+      // 本页被 pop 但下层仍是另一个视频页时，播放器单例的 owner 会在
+      // didPopNext 中切回可见页面；这里不能再由旧页面去 pause 共享播放器
+      pauseOnPop: !_isEnteringPipMode && !returningToVideoPage,
+    );
+  }
+
+  /// 用户主动关闭小窗（点 X）后的收尾：暂停播放并落盘进度
+  void _handleInAppPipCloseCleanup() {
+    if (videoDetailController.plPlayerController.isCloseAll) {
+      return;
+    }
+    if (Platform.isAndroid && !videoDetailController.setSystemBrightness) {
+      ScreenBrightnessPlatform.instance.resetApplicationScreenBrightness();
+    }
+    PlPlayerController.setPlayCallBack(null);
+    videoPlayerServiceHandler?.onVideoDetailDispose(heroTag);
+    plPlayerController ??= videoDetailController.plPlayerController;
+    if (plPlayerController != null) {
+      if (videoDetailController.isFileSource) {
+        videoDetailController.playedTime = Duration(
+          milliseconds: plPlayerController!.positionInMilliseconds,
+        );
+        videoDetailController.cacheLocalProgress();
+      }
+      videoDetailController.makeHeartBeat();
+      if (mounted) {
+        // owner 页面仍在路由栈内，只能暂停：dispose 会消耗页面持有的
+        // _playerCount，返回后 setDataSource 会因计数为 0 静默中止，
+        // 播放器区域永久黑屏且失去交互
+        plPlayerController!.pause();
+        // 按 X 是明确的停止意图，改写快照使返回后保持暂停而非续播
+        videoDetailController.playerStatus = PlayerStatus.paused;
+      } else {
+        plPlayerController!.dispose();
+      }
+    } else {
+      PlPlayerController.updatePlayCount();
+    }
+  }
+
   bool get isFullScreen =>
       videoDetailController.plPlayerController.isFullScreen.value;
 
@@ -138,6 +388,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   @override
   void initState() {
     super.initState();
+
+    VideoStackManager.increment(); // 追踪视频页面层级
 
     PlPlayerController.setPlayCallBack(playCallBack);
     videoDetailController = Get.put(VideoDetailController(), tag: heroTag);
@@ -327,6 +579,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
   @override
   void dispose() {
+    VideoStackManager.decrement(); // 减少视频页面层级追踪
+    final isInAppPip = PipOverlayService.isInPipMode;
+
     plPlayerController
       ?..removeStatusLister(playerListener)
       ..removePositionListener(positionListener);
@@ -335,7 +590,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       tag: videoDetailController.heroTag,
     );
 
-    if (!videoDetailController.isFileSource) {
+    // 小窗仍在运行时不关掉简介的定时器，返回页面时还要用
+    if (!videoDetailController.isFileSource &&
+        !isInAppPip &&
+        !_isEnteringPipMode) {
       if (videoDetailController.isUgc) {
         ugcIntroController
           ..cancelTimer()
@@ -350,12 +608,17 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     }
 
     if (!videoDetailController.plPlayerController.isCloseAll) {
-      videoPlayerServiceHandler?.onVideoDetailDispose(heroTag);
-      if (plPlayerController != null) {
+      if (isInAppPip || _isEnteringPipMode) {
+        // 小窗持有播放器，页面只留下心跳，不能 dispose
         videoDetailController.makeHeartBeat();
-        plPlayerController!.dispose();
       } else {
-        PlPlayerController.updatePlayCount();
+        videoPlayerServiceHandler?.onVideoDetailDispose(heroTag);
+        if (plPlayerController != null) {
+          videoDetailController.makeHeartBeat();
+          plPlayerController!.dispose();
+        } else {
+          PlPlayerController.updatePlayCount();
+        }
       }
     }
     removeObserverMobile(this);
@@ -377,17 +640,46 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
     introController.cancelTimer();
 
+    // 计算是否要进入应用内小窗：正在播放 + 非全屏 + 通过各项检查
+    final playerStatusBeforePush = plPlayerController?.playerStatus.value;
+    final bool willStartPip =
+        plPlayerController != null &&
+        playerStatusBeforePush?.isPlaying == true &&
+        !plPlayerController!.isFullScreen.value &&
+        _shouldStartInAppPip();
+
+    // 进入小窗或已在小窗时必须保活，否则播放器会被暂停/清理
+    final bool shouldKeepAlive =
+        _isEnteringPipMode || PipOverlayService.isInPipMode || willStartPip;
+
     videoDetailController
       ..videoState.value = false
-      ..cancelBlockListener()
-      ..playerStatus = plPlayerController?.playerStatus.value
+      ..playerStatus = willStartPip
+          ? PlayerStatus.playing
+          : playerStatusBeforePush
       ..brightness = plPlayerController?.brightness.value;
+
+    if (shouldKeepAlive) {
+      _logSponsorBlock(
+        'didPushNext() preserving blockListener (entering PiP or in PiP mode)',
+      );
+    } else {
+      _logSponsorBlock('didPushNext() cancelling blockListener');
+      videoDetailController.cancelBlockListener();
+    }
+
     if (plPlayerController != null) {
       videoDetailController.makeHeartBeat();
       plPlayerController!
         ..removeStatusLister(playerListener)
-        ..removePositionListener(positionListener)
-        ..pause();
+        ..removePositionListener(positionListener);
+
+      if (willStartPip) {
+        _startInAppPipIfNeeded();
+      } else if (!shouldKeepAlive) {
+        // 只有在确定不进入小窗时才暂停播放
+        plPlayerController!.pause();
+      }
     }
   }
 
@@ -404,7 +696,41 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
     addObserverMobile(this);
 
+    // local 的实例可能指向已被销毁的单例，刷新它
+    if (plPlayerController != videoDetailController.plPlayerController) {
+      plPlayerController = videoDetailController.plPlayerController;
+    }
+
     plPlayerController?.isLive = false;
+
+    // 从应用内小窗返回：关闭小窗，把播放控制权交回本页
+    if (PipOverlayService.isInPipMode) {
+      final String? targetContextKey = PipOverlayService.contextKeyFromArgs(
+        videoDetailController.args,
+      );
+      if (PipOverlayService.savedVideoContextKey == targetContextKey) {
+        // 小窗播的就是本页视频：非销毁式关闭，保留播放器供本页续用
+        _logSponsorBlock('didPopNext() closing PiP for same video');
+        PipOverlayService.stopPip(
+          callOnClose: true,
+          targetContextKey: targetContextKey,
+        );
+      } else {
+        // 小窗播的是别的视频：必须立即关闭，否则两份播放同时进行
+        _logSponsorBlock('didPopNext() closing PiP for different video');
+        PipOverlayService.stopPip(callOnClose: true, immediate: true);
+      }
+      _resetEnteringPipFlags();
+    } else if (_isEnteringPipMode || videoDetailController.isEnteringPip) {
+      // 曾尝试进小窗但被抢占/中止，复位标志避免 controller 卡在"小窗中"状态
+      _resetEnteringPipFlags();
+    }
+
+    // 视频页返回时，若直播小窗仍在运行，也需关闭
+    if (LivePipOverlayService.isInPipMode) {
+      LivePipOverlayService.stopLivePip(callOnClose: true, immediate: true);
+    }
+
     if (videoDetailController.plPlayerController.playerStatus.isPlaying &&
         videoDetailController.playerStatus != PlayerStatus.playing) {
       videoDetailController.plPlayerController.pause();
@@ -1204,8 +1530,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         !isFullScreen &&
         !videoDetailController.plPlayerController.isDesktopPip &&
         (videoDetailController.horizontalScreen || isPortrait),
-    onPopInvokedWithResult:
-        videoDetailController.plPlayerController.onPopInvokedWithResult,
+    onPopInvokedWithResult: _onPopInvokedWithResult,
     child: Obx(
       () =>
           !videoDetailController.videoState.value ||

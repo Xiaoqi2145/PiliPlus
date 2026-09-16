@@ -52,10 +52,12 @@ const int _kTrimCount = _kMaxChatCount + 50;
 const int _kSafeTrimIndex = 200;
 
 class LiveRoomController extends GetxController {
-  LiveRoomController(this.heroTag);
+  LiveRoomController(this.heroTag, {this.fromPip = false});
   final String heroTag;
+  final bool fromPip;
 
   int roomId = Get.arguments;
+  bool isReturningFromPip = false;
   int? ruid;
   DanmakuController<DanmakuExtra>? danmakuController;
   final plPlayerController = PlPlayerController.getInstance(
@@ -66,6 +68,10 @@ class LiveRoomController extends GetxController {
   final roomInfoH5 = Rxn<RoomInfoH5Data>();
 
   final liveTime = Rxn<int>();
+
+  // PiP 模式标志：进入应用内小窗时置位，用于 onClose 跳过资源清理
+  RxBool isInPipMode = false.obs;
+
   Timer? liveTimeTimer;
 
   void startLiveTimer() {
@@ -201,7 +207,18 @@ class LiveRoomController extends GetxController {
     final account = Accounts.main;
     isLogin = account.isLogin;
     mid = account.mid;
-    queryLiveUrl(autoFullScreenFlag: true);
+    // 直接透传构造函数传入的 fromPip 标志，因为它在 view.dart 中已经经过了校验
+    isReturningFromPip = fromPip;
+
+    if (isReturningFromPip) {
+      isPortrait.value = plPlayerController.isVertical;
+      isLoaded.value = true;
+      // 播放器无需重建，但 stream/ruid/liveTime 等元数据随旧 controller 丢失，
+      // 必须重新拉取；playerInit 会因 isReturningFromPip 跳过数据源初始化
+      queryLiveUrl();
+    } else {
+      queryLiveUrl(autoFullScreenFlag: true);
+    }
     queryLiveInfoH5();
     if (Accounts.heartbeat.isLogin && !Pref.historyPause) {
       VideoHttp.roomEntryAction(roomId: roomId);
@@ -216,6 +233,10 @@ class LiveRoomController extends GetxController {
     bool autoFullScreenFlag = false,
   }) {
     if (videoUrl == null) {
+      return null;
+    }
+    // 如果是从小窗返回，播放器已在播放，跳过初始化
+    if (isReturningFromPip) {
       return null;
     }
     return plPlayerController.setDataSource(
@@ -264,6 +285,9 @@ class LiveRoomController extends GetxController {
         ),
         if (isLogin && !isLoaded.value) _fetchBlockRules(),
       ]);
+      // 置于 initLiveUrl 之后：恢复场景的首次拉取靠该标志让 playerInit 跳过
+      // 数据源重建，完成后清零，切换路线/画质才会真正重建数据源
+      isReturningFromPip = false;
       isLoaded.value = true;
     } else {
       _showDialog(res.toString());
@@ -508,21 +532,24 @@ class LiveRoomController extends GetxController {
   @override
   void onClose() {
     _stopSizeSub();
-    closeLiveMsg();
-    cancelLikeTimer();
-    cancelLiveTimer();
-    savedDanmaku?.clear();
-    savedDanmaku = null;
-    messages.clear();
-    if (showSuperChat) {
-      superChatMsg.clear();
-      fsSC.value = null;
+    // 如果在小窗模式，不清理资源
+    if (!isInPipMode.value) {
+      closeLiveMsg();
+      cancelLikeTimer();
+      cancelLiveTimer();
+      savedDanmaku?.clear();
+      savedDanmaku = null;
+      messages.clear();
+      if (showSuperChat) {
+        superChatMsg.clear();
+        fsSC.value = null;
+      }
+      scrollController
+        ..removeListener(listener)
+        ..dispose();
+      pageController?.dispose();
+      danmakuController = null;
     }
-    scrollController
-      ..removeListener(listener)
-      ..dispose();
-    pageController?.dispose();
-    danmakuController = null;
     super.onClose();
   }
 
