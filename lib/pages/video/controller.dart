@@ -128,6 +128,10 @@ class VideoDetailController extends GetxController
   /// 是否正在进入应用内小窗
   bool isEnteringPip = false;
 
+  /// 是否正处于应用内小窗恢复流程。恢复时播放器与媒体都还在，
+  /// 只能续用现有数据源，重建会导致黑帧且重置播放位置。
+  bool isRestoringFromPip = false;
+
   final plPlayerController = PlPlayerController.getInstance()
     ..brightness.value = -1;
   bool get setSystemBrightness => plPlayerController.setSystemBrightness;
@@ -365,18 +369,43 @@ class VideoDetailController extends GetxController
     // 开启新视频时，如果存在前代播放器的应用内小窗，则按播放上下文决定是否重置旧状态
     // 避免不同视频/分P之间 SponsorBlock 片段状态污染，同时保留同上下文无缝恢复能力
     if (PipOverlayService.isInPipMode) {
+      final String? pipContextKey = PipOverlayService.contextKeyFromArgs(args);
+      // 同上下文恢复：小窗里的播放器就是本页要接管的那一个，
+      // 此时既不能暂停也不能重置，否则恢复后停在暂停态并重新 open 媒体
+      isRestoringFromPip =
+          PipOverlayService.savedVideoContextKey == pipContextKey;
+      if (isRestoringFromPip) {
+        // 复用现有播放器：先显示播放器区域，避免拉取元数据期间空白；
+        // 同时复位进入小窗时留下的保活标志，并确保页面按播放态渲染
+        videoState.value = true;
+        isEnteringPip = false;
+        // 小窗只在自动播放开启时才会进入，恢复后沿用该状态渲染播放器
+        _autoPlay.value = true;
+      }
+
       if (kDebugMode) {
         debugPrint(
-          '[VideoDetailController] Active PiP detected, closing before new video initialization with context-aware reset',
+          '[VideoDetailController] Active PiP detected, restoring=$isRestoringFromPip',
         );
       }
       PipOverlayService.stopPip(
         immediate: true,
-        targetContextKey: PipOverlayService.contextKeyFromArgs(args),
+        callOnClose: !isRestoringFromPip,
+        targetContextKey: pipContextKey,
       );
-      // 同步清理旧视频的 SponsorBlock 状态，避免污染新视频
-      // 不能放在 stopPip 里异步执行，否则会与新视频初始化竞态
-      resetBlock();
+      if (isRestoringFromPip) {
+        // 旧页面进入小窗时其引用计数被刻意保留，用来续命播放器；本页
+        // 新建 controller 时又加了一条。这里释放属于旧页面的那条多余引用
+        // （只剩一条时不动，避免销毁正在复用的播放器），否则本页销毁后
+        // 计数停在 1，播放器永远不会释放。
+        PlPlayerController.releaseExtraPlayerCount();
+      }
+
+      if (!isRestoringFromPip) {
+        // 同步清理旧视频的 SponsorBlock 状态，避免污染新视频
+        // 不能放在 stopPip 里异步执行，否则会与新视频初始化竞态
+        resetBlock();
+      }
     }
 
     videoType = args['videoType'];
@@ -728,7 +757,8 @@ class VideoDetailController extends GetxController
   }
 
   Future<void>? _initPlayerIfNeeded(bool autoFullScreenFlag) {
-    if (_autoPlay.value ||
+    if (isRestoringFromPip ||
+        _autoPlay.value ||
         (plPlayerController.preInitPlayer && !plPlayerController.processing) &&
             (isFileSource
                 ? true
@@ -744,43 +774,55 @@ class VideoDetailController extends GetxController
     bool? autoplay,
     bool autoFullScreenFlag = false,
   }) async {
-    Duration? seek = defaultST ?? playedTime;
-    if (seek == .zero) seek = null;
-    seek ??= getFirstSegment();
-    await plPlayerController.setDataSource(
-      isFileSource
-          ? FileSource(
-              dir: args['dirPath'],
-              typeTag: entry.typeTag!,
-              isMp4: entry.mediaType == 1,
-              hasDashAudio: entry.hasDashAudio,
-            )
-          : NetworkSource(
-              videoSource: videoUrl!,
-              audioSource: audioUrl,
-            ),
-      seekTo: seek,
-      duration: data.timeLength == null
-          ? null
-          : Duration(milliseconds: data.timeLength!),
-      isVertical: isVertical.value,
-      aid: aid,
-      bvid: bvid,
-      cid: cid.value,
-      autoplay: autoplay ?? _autoPlay.value,
-      epid: isUgc ? null : epId,
-      seasonId: isUgc ? null : seasonId,
-      pgcType: isUgc ? null : pgcType,
-      videoType: videoType,
-      onInit: () {
-        videoState.value = true;
-        setSubtitle(vttSubtitlesIndex.value);
-      },
-      width: firstVideo.width,
-      height: firstVideo.height,
-      volume: volume,
-      autoFullScreenFlag: autoFullScreenFlag,
-    );
+    // 从应用内小窗恢复时播放器实例与数据源都仍然有效，再次
+    // setDataSource 会重新 open 媒体（黑帧 + 回到起点）。这里只跳过媒体
+    // 重建，后面的跳过片段/字幕/弹幕等元数据初始化仍然照常执行。
+    // 守卫只消费一次：后续换清晰度/分P 等主动重建仍走正常初始化。
+    if (isRestoringFromPip) {
+      isRestoringFromPip = false;
+      videoState.value = true;
+      setSubtitle(vttSubtitlesIndex.value);
+      // 恢复不重新定位，残留的 defaultST 会污染后续换清晰度/分P
+      defaultST = null;
+    } else {
+      Duration? seek = defaultST ?? playedTime;
+      if (seek == .zero) seek = null;
+      seek ??= getFirstSegment();
+      await plPlayerController.setDataSource(
+        isFileSource
+            ? FileSource(
+                dir: args['dirPath'],
+                typeTag: entry.typeTag!,
+                isMp4: entry.mediaType == 1,
+                hasDashAudio: entry.hasDashAudio,
+              )
+            : NetworkSource(
+                videoSource: videoUrl!,
+                audioSource: audioUrl,
+              ),
+        seekTo: seek,
+        duration: data.timeLength == null
+            ? null
+            : Duration(milliseconds: data.timeLength!),
+        isVertical: isVertical.value,
+        aid: aid,
+        bvid: bvid,
+        cid: cid.value,
+        autoplay: autoplay ?? _autoPlay.value,
+        epid: isUgc ? null : epId,
+        seasonId: isUgc ? null : seasonId,
+        pgcType: isUgc ? null : pgcType,
+        videoType: videoType,
+        onInit: () {
+          videoState.value = true;
+          setSubtitle(vttSubtitlesIndex.value);
+        },
+        width: firstVideo.width,
+        height: firstVideo.height,
+        volume: volume,
+        autoFullScreenFlag: autoFullScreenFlag,
+      );
+    }
 
     if (isClosed) return;
 
@@ -850,6 +892,9 @@ class VideoDetailController extends GetxController
       return _initPlayerIfNeeded(autoFullScreenFlag);
     }
     if (isQuerying) {
+      // 并发请求会让本次初始化直接返回，恢复守卫不能一直挂着，
+      // 否则之后主动换清晰度时会被误判成"复用现有媒体"而跳过重建
+      isRestoringFromPip = false;
       return;
     }
     isQuerying = true;
@@ -894,6 +939,15 @@ class VideoDetailController extends GetxController
           defaultST = Duration(milliseconds: progress);
         } else {
           defaultST = Duration(milliseconds: data.lastPlayTime);
+        }
+        // 服务端 last_play_time 在播完后可能停在总时长处。继续用该位置
+        // 打开会让播放器立刻判定结束并暂停，因此已看完一律从头开始。
+        final totalMs = data.timeLength;
+        if (totalMs != null &&
+            totalMs > 0 &&
+            defaultST!.inMilliseconds >=
+                totalMs - Duration.millisecondsPerSecond) {
+          defaultST = Duration.zero;
         }
       }
 
@@ -942,6 +996,11 @@ class VideoDetailController extends GetxController
           return;
         } else {
           SmartDialog.showToast('视频资源不存在');
+          if (isRestoringFromPip) {
+            // 播放器仍持有有效数据源，只是元数据刷新失败，保留播放状态
+            isRestoringFromPip = false;
+            return;
+          }
           _autoPlay.value = false;
           videoState.value = false;
           if (plPlayerController.isFullScreen.value) {
@@ -1008,6 +1067,12 @@ class VideoDetailController extends GetxController
       }
       await _initPlayerIfNeeded(autoFullScreenFlag);
     } else {
+      if (isRestoringFromPip) {
+        // 播放器仍在正常播放，只是元数据刷新失败；不能因此把已有的
+        // 播放器区域销毁。消费掉恢复标志，后续操作回到常规流程。
+        isRestoringFromPip = false;
+        return;
+      }
       _autoPlay.value = false;
       videoState.value = false;
       if (plPlayerController.isFullScreen.value) {

@@ -25,12 +25,16 @@ class HistoryItemModel with MultiSelectData {
   /// while the player expects milliseconds.
   ///
   /// The history API uses `-1` to indicate that the video has been fully watched.
-  /// When reopened, playback should start from the beginning to avoid resuming from
-  /// the last playback position associated with the video streaming account.
+  /// Some entries instead report a progress equal to (or within one second of)
+  /// the total duration. Every finished form must restart from the beginning:
+  /// resuming at the end makes the player report completion and stay paused.
   int? get playbackProgress {
     final progress = this.progress;
     if (progress == null) return null;
-    return progress == -1 ? 0 : progress * Duration.millisecondsPerSecond;
+    if (progress <= 0) return 0;
+    final total = duration;
+    if (total != null && total > 0 && progress >= total - 1) return 0;
+    return progress * Duration.millisecondsPerSecond;
   }
 
   HistoryItemModel({

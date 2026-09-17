@@ -893,10 +893,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     //   await this.seekTo(seekTo);
     // }
 
-    // 自动播放
+    // 自动播放：直接驱动自身播放，不能依赖页面注册的静态回调。
+    // 页面切换/小窗交接期间静态回调可能被清空或仍指向旧页面，
+    // 会导致 setDataSource 完成后停在暂停态。
     if (_autoPlay) {
-      playIfExists();
-      // await play(duration: duration);
+      await play();
     }
   }
 
@@ -1628,6 +1629,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  /// 释放一条不再使用的引用计数，但绝不在只剩最后一条引用时销毁播放器。
+  /// 用于小窗恢复等"新对象只借用同一实例"的场景：此时计数里多出来的那条
+  /// 来自被丢弃的对象，而播放器本身仍要被恢复页继续使用。
+  static void releaseExtraPlayerCount() {
+    final instance = _instance;
+    if (instance != null && instance._playerCount > 1) {
+      instance._playerCount -= 1;
+    }
+  }
+
   void setContinuePlayInBackground() {
     continuePlayInBackground.toggle();
     if (!tempPlayerConf) {
@@ -1729,6 +1740,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void onPopInvokedWithResult(
     bool didPop,
     Object? result, {
+
     /// 正在进入应用内小窗时传 false：退出页面不应暂停播放
     bool pauseOnPop = true,
   }) {

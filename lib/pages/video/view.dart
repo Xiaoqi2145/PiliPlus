@@ -392,7 +392,45 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     VideoStackManager.increment(); // 追踪视频页面层级
 
     PlPlayerController.setPlayCallBack(playCallBack);
-    videoDetailController = Get.put(VideoDetailController(), tag: heroTag);
+    // GetX 已注册同一 tag 且实例有效时，Get.put 返回旧实例并丢弃新建的
+    // candidate；candidate 构造时会调用 PlPlayerController.getInstance()。
+    // 普通导航保持原有计数；只有确认处于同视频小窗恢复时才回收这条引用。
+    final candidate = VideoDetailController();
+    videoDetailController = Get.put(candidate, tag: heroTag);
+    final bool reusedCandidate = !identical(candidate, videoDetailController);
+
+    // 复用了仍注册中的 controller 时 onInit 不会再执行，小窗恢复需要在这里
+    // 接管：同视频同上下文时不能暂停播放器，后续 playerInit 也不能重新 open。
+    // listener 由紧随其后的 videoSourceInit 统一挂载，这里不重复注册。
+    if (reusedCandidate &&
+        Get.arguments['fromPip'] == true &&
+        PipOverlayService.isInPipMode) {
+      final String? pipContextKey = PipOverlayService.contextKeyFromArgs(
+        Get.arguments,
+      );
+      if (PipOverlayService.savedVideoContextKey == pipContextKey) {
+        PlPlayerController.releaseExtraPlayerCount();
+        // 进入小窗时简介等附加控制器被置为保活。恢复的若是同一个
+        // controller，这些实例不会被新建，必须在这里复位，否则其
+        // onClose 会一直跳过清理。
+        for (final key in const ['reply', 'intro']) {
+          final ctrl = PipOverlayService.getAdditionalController(key);
+          try {
+            ctrl?.isEnteringPip = false;
+          } catch (_) {}
+        }
+        videoDetailController
+          ..isRestoringFromPip = true
+          ..isEnteringPip = false
+          ..videoState.value = true
+          ..autoPlay = true;
+        PipOverlayService.stopPip(
+          callOnClose: false,
+          immediate: true,
+          targetContextKey: pipContextKey,
+        );
+      }
+    }
 
     if (videoDetailController.removeSafeArea) {
       hideSystemBar();
@@ -424,6 +462,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
   // 获取视频资源，初始化播放器
   void videoSourceInit() {
+    // 小窗恢复时仍需拉取画质/字幕等元数据；播放器侧的恢复守卫会让首次
+    // playerInit 只接管现有实例，不会再次 setDataSource/open
     videoDetailController.queryVideoUrl(autoFullScreenFlag: true);
     if (videoDetailController.autoPlay) {
       plPlayerController = videoDetailController.plPlayerController;
@@ -709,10 +749,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         videoDetailController.args,
       );
       if (PipOverlayService.savedVideoContextKey == targetContextKey) {
-        // 小窗播的就是本页视频：非销毁式关闭，保留播放器供本页续用
+        // 小窗播的就是本页视频：非销毁式关闭，保留播放器供本页续用。
+        // callOnClose 会 pause，而本页随后会再次 playerInit 重新 open，
+        // 因此这里标记恢复流程，让 playerInit 只接管现有实例。
         _logSponsorBlock('didPopNext() closing PiP for same video');
+        videoDetailController.isRestoringFromPip = true;
         PipOverlayService.stopPip(
-          callOnClose: true,
+          callOnClose: false,
           targetContextKey: targetContextKey,
         );
       } else {
@@ -732,7 +775,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     }
 
     if (videoDetailController.plPlayerController.playerStatus.isPlaying &&
-        videoDetailController.playerStatus != PlayerStatus.playing) {
+        videoDetailController.playerStatus != PlayerStatus.playing &&
+        !videoDetailController.isRestoringFromPip) {
       videoDetailController.plPlayerController.pause();
     }
 
