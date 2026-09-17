@@ -303,6 +303,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       });
     }
 
+    // 移动端由 _tapGestureRecognizer 自行判定双击，从而不受框架双击识别器
+    // hold 竞技场的影响（否则单击回调会被推迟到 kDoubleTapTimeout=300ms 之后，
+    // 实测 302~316ms）。桌面端沿用框架双击识别器，行为保持不变。
+    final selfManagedDoubleTap = PlatformUtils.isMobile;
+
     if (plPlayerController.enableTapDm) {
       _tapGestureRecognizer = ImmediateTapGestureRecognizer(
         onTapDown: plPlayerController.enableShowDanmaku.value
@@ -310,6 +315,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
             : null,
         onTapUp: _onTapUp,
         onTapCancel: _removeDmAction,
+        onDoubleTap: selfManagedDoubleTap ? _onDoubleTapDown : null,
+        onTapRevert: selfManagedDoubleTap ? _onTapRevert : null,
       );
 
       _danmakuListener = plPlayerController.enableShowDanmaku.listen((value) {
@@ -317,7 +324,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         _tapGestureRecognizer.onTapDown = value ? _onTapDown : null;
       });
     } else {
-      _tapGestureRecognizer = ImmediateTapGestureRecognizer(onTapUp: _onTapUp);
+      _tapGestureRecognizer = ImmediateTapGestureRecognizer(
+        onTapUp: _onTapUp,
+        onDoubleTap: selfManagedDoubleTap ? _onDoubleTapDown : null,
+        onTapRevert: selfManagedDoubleTap ? _onTapRevert : null,
+      );
     }
 
     _doubleTapGestureRecognizer = DoubleTapGestureRecognizer()
@@ -1152,18 +1163,34 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     plPlayerController.doubleTapFuc(type);
   }
 
+  /// 单击切换控制层前的状态，供双击成立时回滚（见 [_onTapRevert]）。
+  bool? _controlsBeforeTap;
+
   void _onTapUp(TapUpDetails details) {
     switch (details.kind) {
       case ui.PointerDeviceKind.mouse when PlatformUtils.isDesktop:
         plPlayerController.onDoubleTapCenter();
       default:
         if (_suspendedDm == null) {
+          // 记录切换前的状态，供双击成立时回滚（对齐 B 站：
+          // 双击快退/快进不留下控制 UI）
+          _controlsBeforeTap = plPlayerController.showControls.value;
           plPlayerController.controls = !plPlayerController.showControls.value;
         } else if (_suspendedDm!.suspend) {
           _dmOffset.value = details.localPosition;
         } else {
           _suspendedDm = null;
         }
+    }
+  }
+
+  /// 双击成立时回滚第一下的控制层切换：把控制层恢复到单击前的状态，
+  /// 使双击（快退/暂停/快进）不留下控制 UI。对齐 B 站行为。
+  void _onTapRevert() {
+    final before = _controlsBeforeTap;
+    _controlsBeforeTap = null;
+    if (before != null && plPlayerController.showControls.value != before) {
+      plPlayerController.controls = before;
     }
   }
 
@@ -1248,7 +1275,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       _tapGestureRecognizer.addPointer(event);
       if (controlsUnlock) {
         if (!plPlayerController.isLive) {
-          _doubleTapGestureRecognizer.addPointer(event);
+          // 双击已由 _tapGestureRecognizer 自行判定，不再注册进竞技场：
+          // 框架的 DoubleTapGestureRecognizer 会在首次按下就 hold 住竞技场，
+          // 把单击回调推迟 kDoubleTapTimeout(300ms) 之后才触发。
           longPressRecognizer.addPointer(event);
         }
         _scaleGestureRecognizer

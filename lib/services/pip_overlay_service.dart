@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:math' show max, min;
 
+import 'package:PiliPlus/common/widgets/gesture/immediate_tap_gesture_recognizer.dart';
 import 'package:PiliPlus/common/widgets/pip_control_button.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
@@ -14,7 +15,11 @@ import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart'
-    show PointerEnterEvent, PointerExitEvent, PointerScrollEvent;
+    show
+        PointerEnterEvent,
+        PointerExitEvent,
+        PointerScrollEvent,
+        ScaleGestureRecognizer;
 import 'package:material_ui/material_ui.dart';
 import 'package:get/get.dart';
 
@@ -452,6 +457,9 @@ class _PipWidgetState extends State<PipWidget>
 
   bool _showControls = true;
   Timer? _hideTimer;
+
+  /// 单击切换控制栏前的状态，供双击成立时回滚。
+  bool? _controlsBeforeTap;
   // 桌面端:鼠标悬停时控制栏保持显示,移出即隐藏
   bool _hovering = false;
 
@@ -586,11 +594,26 @@ class _PipWidgetState extends State<PipWidget>
   void _onTap() {
     // 悬停中由 hover 驱动;触摸/笔等无 hover 场景保留点击切换兜底
     if (_hovering) return;
+    // 记录切换前状态，供双击成立时回滚（对齐 B 站：双击不留控制 UI）
+    _controlsBeforeTap = _showControls;
     setState(() {
       _showControls = !_showControls;
     });
     if (_showControls) {
       _startHideTimer();
+    }
+  }
+
+  /// 双击成立时回滚第一下的控制层切换，使双击不留下控制 UI。
+  void _onTapRevert() {
+    final before = _controlsBeforeTap;
+    _controlsBeforeTap = null;
+    if (before == null || _showControls == before) return;
+    setState(() => _showControls = before);
+    if (_showControls) {
+      _startHideTimer();
+    } else {
+      _hideTimer?.cancel();
     }
   }
 
@@ -828,40 +851,80 @@ class _PipWidgetState extends State<PipWidget>
                             child: Stack(
                               children: [
                                 Positioned.fill(
-                                  child: GestureDetector(
+                                  child: RawGestureDetector(
                                     behavior: HitTestBehavior.opaque,
-                                    onTap: _onTap,
-                                    onDoubleTap: _onDoubleTap,
-                                    // 仅视频区域处理小窗移动/缩放，避免与控制按钮竞争手势。
-                                    onScaleStart: (_) {
-                                      _hideTimer?.cancel();
-                                      _scaleStart = _scale;
-                                      _instantResize = true;
-                                    },
-                                    onScaleUpdate: (details) {
-                                      setState(() {
-                                        // 平移:单指拖动 / 双指整体移动(focalPointDelta)
-                                        _left = _left! + details.focalPointDelta.dx;
-                                        _top = _top! + details.focalPointDelta.dy;
-                                        // 缩放:双指时 scale≠1;单指恒为 1,仅钳位置
-                                        if (details.scale != 1.0) {
-                                          _applyScaleAroundCenter(
-                                            _scaleStart * details.scale,
-                                            screenSize,
-                                          );
-                                        } else {
-                                          _clampPositionInScreen(screenSize);
-                                        }
-                                      });
-                                      PipWindowMemory.position =
-                                          Offset(_left!, _top!);
-                                      PipWindowMemory.scale = _scale;
-                                    },
-                                    onScaleEnd: (_) {
-                                      setState(() => _instantResize = false);
-                                      if (_showControls) {
-                                        _startHideTimer();
-                                      }
+                                    gestures: {
+                                      // 单击与双击由同一识别器自行判定：框架的
+                                      // GestureDetector 若同时挂 onTap + onDoubleTap，
+                                      // 双击识别器会在首次按下就 hold 住竞技场，
+                                      // 把单击回调推迟 300ms（实测 302~304ms）。
+                                      ImmediateTapGestureRecognizer:
+                                          GestureRecognizerFactoryWithHandlers<
+                                            ImmediateTapGestureRecognizer
+                                          >(
+                                            ImmediateTapGestureRecognizer.new,
+                                            (r) {
+                                              r
+                                                ..onTapUp = (_) {
+                                                  _onTap();
+                                                }
+                                                ..onDoubleTap = (_) {
+                                                  _onDoubleTap();
+                                                }
+                                                ..onTapRevert = _onTapRevert;
+                                            },
+                                          ),
+                                      // 仅视频区域处理小窗移动/缩放，避免与控制按钮竞争手势。
+                                      ScaleGestureRecognizer:
+                                          GestureRecognizerFactoryWithHandlers<
+                                            ScaleGestureRecognizer
+                                          >(
+                                            ScaleGestureRecognizer.new,
+                                            (r) => r
+                                              ..onStart = (_) {
+                                                _hideTimer?.cancel();
+                                                _scaleStart = _scale;
+                                                _instantResize = true;
+                                              }
+                                              ..onUpdate = (details) {
+                                                setState(() {
+                                                  // 平移:单指拖动 / 双指整体移动(focalPointDelta)
+                                                  _left =
+                                                      _left! +
+                                                      details
+                                                          .focalPointDelta
+                                                          .dx;
+                                                  _top =
+                                                      _top! +
+                                                      details
+                                                          .focalPointDelta
+                                                          .dy;
+                                                  // 缩放:双指时 scale≠1;单指恒为 1,仅钳位置
+                                                  if (details.scale != 1.0) {
+                                                    _applyScaleAroundCenter(
+                                                      _scaleStart *
+                                                          details.scale,
+                                                      screenSize,
+                                                    );
+                                                  } else {
+                                                    _clampPositionInScreen(
+                                                      screenSize,
+                                                    );
+                                                  }
+                                                });
+                                                PipWindowMemory.position =
+                                                    Offset(_left!, _top!);
+                                                PipWindowMemory.scale = _scale;
+                                              }
+                                              ..onEnd = (_) {
+                                                setState(
+                                                  () => _instantResize = false,
+                                                );
+                                                if (_showControls) {
+                                                  _startHideTimer();
+                                                }
+                                              },
+                                          ),
                                     },
                                     child: AbsorbPointer(
                                       child: widget.videoPlayerBuilder(
