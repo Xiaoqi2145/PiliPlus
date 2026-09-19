@@ -964,11 +964,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }),
 
       ///completed
-      stream.completed.listen((bool completed) {
+      stream.completed.listen((bool completed) async {
         if (completed) {
           videoPlayerServiceHandler?.beginTransition();
           playerStatus.value = .completed;
-          audioSessionHandler?.setActive(false);
+          // Abandon focus before notifying the next item.  The session
+          // handler serializes this with a subsequent play request so the
+          // completed item cannot keep focus or release it out of order.
+          await audioSessionHandler?.setActive(false);
 
           for (final element in _statusListeners) {
             element(.completed);
@@ -1230,7 +1233,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     // 主动暂停时让出音频焦点
     if (!isInterrupt) {
-      audioSessionHandler?.setActive(false);
+      await audioSessionHandler?.setActive(false);
     }
   }
 
