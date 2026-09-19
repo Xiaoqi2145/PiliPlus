@@ -242,7 +242,6 @@ class FavDetailController
               'favTitle': folder.title,
               'count': folder.mediaCount,
               'desc': true,
-              if (index != null) 'isContinuePlaying': index != 0,
               'isOwner': isOwner,
             }
           : null,

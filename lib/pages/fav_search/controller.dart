@@ -70,7 +70,6 @@ class FavSearchController
       'favTitle': title,
       'count': count,
       'desc': true,
-      'isContinuePlaying': true,
     },
   );
 }
