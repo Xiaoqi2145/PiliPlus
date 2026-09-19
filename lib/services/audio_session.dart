@@ -3,73 +3,115 @@ import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:audio_session/audio_session.dart';
 
 class AudioSessionHandler {
-  late AudioSession session;
+  late final AudioSession _session;
+  late final Future<void> _ready;
   bool _playInterrupted = false;
+  bool _isDucked = false;
+  double? _volumeBeforeDuck;
+  PlPlayerController? _duckedPlayer;
+  PlPlayerController? _interruptedPlayer;
 
-  Future<bool> setActive(bool active) {
-    return session.setActive(active);
+  Future<bool> setActive(bool active) async {
+    await _ready;
+    if (!active) _restoreDuckedVolume();
+    return _session.setActive(active);
   }
 
   AudioSessionHandler() {
-    initSession();
+    _ready = _initSession();
   }
 
-  Future<void> initSession() async {
-    session = await AudioSession.instance;
-    session.configure(const AudioSessionConfiguration.music());
+  Future<void> _initSession() async {
+    _session = await AudioSession.instance;
+    await _session.configure(const AudioSessionConfiguration.music());
 
-    session.interruptionEventStream.listen((event) {
-      final playerStatus = PlPlayerController.getPlayerStatusIfExists();
-      // final player = PlPlayerController.getInstance();
+    _session.interruptionEventStream.listen((event) {
+      final player = PlPlayerController.instance;
+      final playerStatus = player?.playerStatus.value;
       if (event.begin) {
-        if (playerStatus != PlayerStatus.playing) return;
-        // if (!player.playerStatus.playing) return;
+        if (player == null || playerStatus != PlayerStatus.playing) return;
         switch (event.type) {
           case AudioInterruptionType.duck:
-            PlPlayerController.setVolumeIfExists(
-              (PlPlayerController.getVolumeIfExists() ?? 0) * 0.5,
-              showIndicator: false,
-            );
-            // player.setVolume(player.volume.value * 0.5);
+            if (!_isDucked) {
+              final volume = PlPlayerController.getVolumeIfExists();
+              if (volume != null) {
+                _volumeBeforeDuck = volume;
+                _duckedPlayer = player;
+                _isDucked = true;
+                PlPlayerController.setVolumeIfExists(
+                  volume * 0.5,
+                  showIndicator: false,
+                );
+              }
+            }
             break;
           case AudioInterruptionType.pause:
             PlPlayerController.pauseIfExists(isInterrupt: true);
-            // player.pause(isInterrupt: true);
             _playInterrupted = true;
+            _interruptedPlayer = player;
             break;
           case AudioInterruptionType.unknown:
             PlPlayerController.pauseIfExists(isInterrupt: true);
-            // player.pause(isInterrupt: true);
-            _playInterrupted = true;
+            // Unknown interruptions (including permanent focus loss) must not
+            // be resumed automatically when the platform later reports gain.
+            _playInterrupted = false;
+            _interruptedPlayer = null;
             break;
         }
       } else {
         switch (event.type) {
           case AudioInterruptionType.duck:
-            PlPlayerController.setVolumeIfExists(
-              (PlPlayerController.getVolumeIfExists() ?? 0) * 2,
-              showIndicator: false,
-            );
-            // player.setVolume(player.volume.value * 2);
+            // Preserve a manual volume change made while ducked.
+            _restoreDuckedVolume();
             break;
           case AudioInterruptionType.pause:
-            if (_playInterrupted) PlPlayerController.playIfExists();
-            //player.play();
+            final shouldResume =
+                _playInterrupted &&
+                identical(_interruptedPlayer, PlPlayerController.instance) &&
+                PlPlayerController.getPlayerStatusIfExists() ==
+                    PlayerStatus.paused;
+            _playInterrupted = false;
+            _interruptedPlayer = null;
+            if (shouldResume) PlPlayerController.playIfExists();
             break;
           case AudioInterruptionType.unknown:
+            _playInterrupted = false;
+            _interruptedPlayer = null;
             break;
         }
-        _playInterrupted = false;
       }
     });
 
     // 耳机拔出暂停
-    session.becomingNoisyEventStream.listen((_) {
+    _session.becomingNoisyEventStream.listen((_) {
       PlPlayerController.pauseIfExists();
-      // final player = PlPlayerController.getInstance();
-      // if (player.playerStatus.playing) {
-      //   player.pause();
-      // }
     });
+  }
+
+  /// Prevents a focus interruption from resuming playback after a user pause.
+  void cancelInterruptionResume() {
+    _playInterrupted = false;
+    _interruptedPlayer = null;
+  }
+
+  void _restoreDuckedVolume() {
+    if (!_isDucked) return;
+    final volumeBeforeDuck = _volumeBeforeDuck;
+    final samePlayer = identical(_duckedPlayer, PlPlayerController.instance);
+    final currentVolume = samePlayer
+        ? PlPlayerController.getVolumeIfExists()
+        : null;
+    if (currentVolume != null && volumeBeforeDuck != null) {
+      final duckedVolume = volumeBeforeDuck * 0.5;
+      if ((currentVolume - duckedVolume).abs() < 0.01) {
+        PlPlayerController.setVolumeIfExists(
+          volumeBeforeDuck,
+          showIndicator: false,
+        );
+      }
+    }
+    _isDucked = false;
+    _volumeBeforeDuck = null;
+    _duckedPlayer = null;
   }
 }

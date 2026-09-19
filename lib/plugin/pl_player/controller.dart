@@ -958,6 +958,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       stream.completed.listen((bool completed) {
         if (completed) {
           playerStatus.value = .completed;
+          audioSessionHandler?.setActive(false);
 
           for (final element in _statusListeners) {
             element(.completed);
@@ -1155,9 +1156,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       await seekTo(Duration.zero, isSeek: false);
     }
 
-    await _videoPlayerController?.play();
+    final focusGranted = await audioSessionHandler?.setActive(true) ?? true;
+    if (!focusGranted) {
+      playerStatus.value = PlayerStatus.paused;
+      return;
+    }
 
-    audioSessionHandler?.setActive(true);
+    audioSessionHandler?.cancelInterruptionResume();
+    try {
+      await _videoPlayerController?.play();
+    } catch (_) {
+      await audioSessionHandler?.setActive(false);
+      rethrow;
+    }
 
     playerStatus.value = PlayerStatus.playing;
     // screenManager.setOverlays(false);
@@ -1165,6 +1176,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   /// 暂停播放
   Future<void> pause({bool notify = true, bool isInterrupt = false}) async {
+    if (!isInterrupt) {
+      audioSessionHandler?.cancelInterruptionResume();
+    }
     await _videoPlayerController?.pause();
     playerStatus.value = PlayerStatus.paused;
 
@@ -1608,6 +1622,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _removeListeners();
     _positionListeners.clear();
     _statusListeners.clear();
+    audioSessionHandler?.cancelInterruptionResume();
+    audioSessionHandler?.setActive(false);
     if (playerStatus.isPlaying) {
       WakelockPlus.disable();
     }
