@@ -134,6 +134,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       Pref.continuePlayInBackground.obs;
 
   bool _autoPlay = false;
+  bool _playIntent = false;
 
   // 记录历史记录
   int? _aid;
@@ -152,6 +153,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   late DataSource dataSource;
 
   Timer? _timer;
+  int _streamRecoveryGeneration = 0;
+  bool _streamRecoveryInProgress = false;
   StreamSubscription? _subForSeek;
 
   Box setting = GStorage.setting;
@@ -915,6 +918,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       /// playing
       stream.playing.listen((bool playing) {
         if (playing) {
+          videoPlayerServiceHandler?.endTransition(playing: true);
           _wakeLockTimer?.cancel();
           _wakeLockTimer = null;
           WakelockPlus.enable();
@@ -957,6 +961,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ///completed
       stream.completed.listen((bool completed) {
         if (completed) {
+          videoPlayerServiceHandler?.beginTransition();
           playerStatus.value = .completed;
           audioSessionHandler?.setActive(false);
 
@@ -1020,6 +1025,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           }
           return;
         }
+        if (_playIntent) {
+          _recoverStreamAfterError();
+        }
         if (event.startsWith("Failed to open https://") ||
             event.startsWith("Can not open external file https://") ||
             //tcp: ffurl_read returned 0xdfb9b0bb
@@ -1062,6 +1070,37 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         }
       }),
     ];
+  }
+
+  Future<void> _recoverStreamAfterError() async {
+    if (_streamRecoveryInProgress || dataSource is FileSource) return;
+    final player = _videoPlayerController;
+    if (player == null) return;
+    _streamRecoveryInProgress = true;
+    final generation = ++_streamRecoveryGeneration;
+    videoPlayerServiceHandler?.beginTransition();
+    try {
+      const delays = <Duration>[
+        Duration(milliseconds: 500),
+        Duration(seconds: 1),
+        Duration(seconds: 2),
+        Duration(seconds: 4),
+      ];
+      for (final delay in delays) {
+        await Future<void>.delayed(delay);
+        if (generation != _streamRecoveryGeneration || !_playIntent) return;
+        if (player.state.playing) return;
+        try {
+          await refreshPlayer();
+          if (player.state.playing) return;
+        } catch (_) {}
+      }
+    } finally {
+      if (generation == _streamRecoveryGeneration) {
+        _streamRecoveryInProgress = false;
+        videoPlayerServiceHandler?.endTransition(playing: false);
+      }
+    }
   }
 
   /// 移除事件监听
@@ -1163,6 +1202,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     audioSessionHandler?.cancelInterruptionResume();
+    _playIntent = true;
     try {
       await _videoPlayerController?.play();
     } catch (_) {
@@ -1180,6 +1220,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       audioSessionHandler?.cancelInterruptionResume();
     }
     await _videoPlayerController?.pause();
+    if (!isInterrupt) _playIntent = false;
     playerStatus.value = PlayerStatus.paused;
 
     // 主动暂停时让出音频焦点
@@ -1585,6 +1626,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     _playerCount = 0;
+    _playIntent = false;
+    _streamRecoveryGeneration++;
     if (removeSafeArea) {
       showSystemBar();
     }

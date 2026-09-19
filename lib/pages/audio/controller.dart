@@ -103,6 +103,12 @@ class AudioController extends GetxController
   String? _next;
   bool get reachStart => _prev == null;
 
+  int _playGeneration = 0;
+  int _streamRecoveryGeneration = 0;
+  bool _streamRecoveryInProgress = false;
+  bool _playIntent = false;
+  String? _lastAudioUrl;
+
   ListOrder order = ListOrder.ORDER_NORMAL;
 
   double? _lastVolume;
@@ -170,7 +176,8 @@ class AudioController extends GetxController
     ConnectivityUtils.isWiFi.then((isWiFi) {
       cacheAudioQa = isWiFi ? Pref.defaultAudioQa : Pref.defaultAudioQaCellular;
       if (!hasAudioUrl) {
-        _queryPlayUrl();
+        final generation = ++_playGeneration;
+        _queryPlayUrl(generation: generation);
       }
     });
     videoPlayerServiceHandler
@@ -195,10 +202,12 @@ class AudioController extends GetxController
   }
 
   Future<void>? onPlay() {
+    _playIntent = true;
     return player?.play();
   }
 
   Future<void>? onPause() {
+    _playIntent = false;
     return player?.pause();
   }
 
@@ -276,23 +285,58 @@ class AudioController extends GetxController
     }
   }
 
-  Future<bool> _queryPlayUrl() async {
+  Future<bool> _queryPlayUrl({int? generation}) async {
     _querySponsorBlock();
-    final res = await AudioGrpc.audioPlayUrl(
+    var res = await AudioGrpc.audioPlayUrl(
       itemType: itemType,
       oid: oid,
       subId: subId,
     );
+    if (_isTransientPlayUrlFailure(res) &&
+        generation != null &&
+        generation == _playGeneration) {
+      for (final delay in const [
+        Duration(milliseconds: 500),
+        Duration(seconds: 1),
+        Duration(seconds: 2),
+        Duration(seconds: 4),
+      ]) {
+        await Future<void>.delayed(delay);
+        if (generation != _playGeneration) return false;
+        res = await AudioGrpc.audioPlayUrl(
+          itemType: itemType,
+          oid: oid,
+          subId: subId,
+        );
+        if (res is Success) break;
+      }
+    }
     if (res case Success(:final response)) {
-      _onPlay(response);
+      if (generation != null && generation != _playGeneration) return false;
+      _onPlay(response, generation: generation);
       return true;
     } else {
-      res.toast();
+      if (generation == null || generation == _playGeneration) res.toast();
       return false;
     }
   }
 
-  void _onPlay(PlayURLResp data) {
+  bool _isTransientPlayUrlFailure(LoadingState<PlayURLResp> result) {
+    if (result case Error(:final errMsg)) {
+      final message = errMsg?.toLowerCase() ?? '';
+      return message.contains('network') ||
+          message.contains('网络') ||
+          message.contains('timeout') ||
+          message.contains('connection') ||
+          message.contains('连接') ||
+          message.contains('超时') ||
+          message.contains('reset') ||
+          message.contains('unavailable');
+    }
+    return false;
+  }
+
+  void _onPlay(PlayURLResp data, {int? generation}) {
     final PlayInfo? playInfo = data.playerInfo.values.firstOrNull;
     if (playInfo != null) {
       http_model.Volume? volume;
@@ -319,7 +363,11 @@ class AudioController extends GetxController
           (e) => e.id <= cacheAudioQa,
           (a, b) => a.id > b.id ? a : b,
         );
-        _onOpenMedia(VideoUtils.getCdnUrl(audio.playUrls), volume: volume);
+        _onOpenMedia(
+          VideoUtils.getCdnUrl(audio.playUrls),
+          volume: volume,
+          generation: generation,
+        );
       } else if (playInfo.hasPlayUrl()) {
         final playUrl = playInfo.playUrl;
         final durls = playUrl.durl;
@@ -328,7 +376,11 @@ class AudioController extends GetxController
         }
         final durl = durls.first;
         position.value = 0;
-        _onOpenMedia(VideoUtils.getCdnUrl(durl.playUrls), volume: volume);
+        _onOpenMedia(
+          VideoUtils.getCdnUrl(durl.playUrls),
+          volume: volume,
+          generation: generation,
+        );
       }
     }
   }
@@ -338,8 +390,13 @@ class AudioController extends GetxController
     String ua = Constants.userAgentApp,
     String? referer,
     http_model.Volume? volume,
+    int? generation,
   }) async {
+    if (generation != null && generation != _playGeneration) return;
     await _initPlayerIfNeeded();
+    if (generation != null && generation != _playGeneration) return;
+    _playIntent = true;
+    _lastAudioUrl = url;
     final extras = audioFilterExtras(volume);
     player
       ?..setMediaHeader(
@@ -389,6 +446,7 @@ class AudioController extends GetxController
       stream.playing.listen((playing) {
         final PlayerStatus playerStatus;
         if (playing) {
+          videoPlayerServiceHandler?.endTransition(playing: true);
           animController.forward();
           playerStatus = PlayerStatus.playing;
         } else {
@@ -405,14 +463,18 @@ class AudioController extends GetxController
           false,
         );
         if (completed) {
+          videoPlayerServiceHandler?.beginTransition();
           if (shutdownTimerService.isWaiting) {
             shutdownTimerService.handleWaiting();
           } else {
             switch (playMode.value) {
               case PlayRepeat.pause:
+                videoPlayerServiceHandler?.endTransition(playing: false);
                 break;
               case PlayRepeat.listOrder:
-                playNext(nextPart: true);
+                if (!playNext(nextPart: true)) {
+                  videoPlayerServiceHandler?.endTransition(playing: false);
+                }
                 break;
               case PlayRepeat.singleCycle:
                 onPlay();
@@ -432,7 +494,54 @@ class AudioController extends GetxController
           }
         }
       }),
+      stream.error.listen((_) {
+        if (_playIntent) _recoverStreamAfterError();
+      }),
     ];
+  }
+
+  Future<void> _recoverStreamAfterError() async {
+    if (_streamRecoveryInProgress || !_playIntent) return;
+    final player = this.player;
+    if (player == null) return;
+    _streamRecoveryInProgress = true;
+    final generation = ++_streamRecoveryGeneration;
+    final playGeneration = _playGeneration;
+    videoPlayerServiceHandler?.beginTransition();
+    try {
+      for (final delay in const [
+        Duration(milliseconds: 500),
+        Duration(seconds: 1),
+        Duration(seconds: 2),
+        Duration(seconds: 4),
+      ]) {
+        await Future<void>.delayed(delay);
+        if (generation != _streamRecoveryGeneration ||
+            playGeneration != _playGeneration ||
+            !_playIntent) {
+          return;
+        }
+        try {
+          if (_lastAudioUrl case final url?) {
+            await player.open(
+              Media(url, start: player.state.position),
+              play: true,
+            );
+            if (!player.state.playing) {
+              await _queryPlayUrl(generation: playGeneration);
+            }
+          } else {
+            await _queryPlayUrl(generation: playGeneration);
+          }
+          if (player.state.playing) return;
+        } catch (_) {}
+      }
+    } finally {
+      if (generation == _streamRecoveryGeneration) {
+        _streamRecoveryInProgress = false;
+        videoPlayerServiceHandler?.endTransition(playing: false);
+      }
+    }
   }
 
   @override
@@ -656,7 +765,10 @@ class AudioController extends GetxController
   }
 
   Future<void>? playOrPause() {
-    return player?.playOrPause();
+    final player = this.player;
+    if (player == null) return null;
+    _playIntent = !player.state.playing;
+    return player.playOrPause();
   }
 
   bool playPrev() {
@@ -680,7 +792,9 @@ class AudioController extends GetxController
             final nextPart = parts[nextIndex];
             oid = nextPart.oid;
             this.subId = [nextPart.subId];
-            _queryPlayUrl().then((res) {
+            videoPlayerServiceHandler?.beginTransition();
+            final generation = ++_playGeneration;
+            _queryPlayUrl(generation: generation).then((res) {
               if (res) {
                 _videoDetailController = null;
               }
@@ -696,6 +810,7 @@ class AudioController extends GetxController
         if (next == playlist!.length - 1 && _next != null) {
           _queryPlayList(isLoadNext: true);
         }
+        videoPlayerServiceHandler?.beginTransition();
         playIndex(next);
         return true;
       }
@@ -713,7 +828,9 @@ class AudioController extends GetxController
         subId ??
         (item.subId.isNotEmpty ? item.subId : [audioItem.parts.first.subId]);
     itemType = item.itemType;
-    _queryPlayUrl().then((res) {
+    final generation = ++_playGeneration;
+    videoPlayerServiceHandler?.beginTransition();
+    _queryPlayUrl(generation: generation).then((res) {
       if (res) {
         _videoDetailController = null;
         _updateCurrItem(audioItem);

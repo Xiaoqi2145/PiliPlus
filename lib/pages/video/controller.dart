@@ -53,6 +53,7 @@ import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/services/pip_overlay_service.dart';
+import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
@@ -844,6 +845,8 @@ class VideoDetailController extends GetxController
   }
 
   bool isQuerying = false;
+  int _queryGeneration = 0;
+  bool _queryPending = false;
 
   final languages = Rxn<List<LanguageItem>>();
   final currLang = Rxn<String>();
@@ -871,6 +874,38 @@ class VideoDetailController extends GetxController
     );
   }
 
+  Future<LoadingState<PlayUrlModel>> _getVideoUrlWithRetry(int quality) async {
+    var result = await _getVideoUrl(quality);
+    if (_isTransientPlayUrlFailure(result)) {
+      for (final delay in const [
+        Duration(milliseconds: 500),
+        Duration(seconds: 1),
+        Duration(seconds: 2),
+        Duration(seconds: 4),
+      ]) {
+        await Future<void>.delayed(delay);
+        result = await _getVideoUrl(quality);
+        if (result is Success) break;
+      }
+    }
+    return result;
+  }
+
+  bool _isTransientPlayUrlFailure(LoadingState<PlayUrlModel> result) {
+    if (result case Error(:final errMsg)) {
+      final message = errMsg?.toLowerCase() ?? '';
+      return message.contains('network') ||
+          message.contains('网络') ||
+          message.contains('timeout') ||
+          message.contains('connection') ||
+          message.contains('连接') ||
+          message.contains('超时') ||
+          message.contains('reset') ||
+          message.contains('unavailable');
+    }
+    return false;
+  }
+
   Future<void> _supplementVideoQualities() async {
     final quality = data.missingVideoQualityBelowHighest;
     if (quality == -1) return;
@@ -888,6 +923,7 @@ class VideoDetailController extends GetxController
     bool fromReset = false,
     bool autoFullScreenFlag = false,
   }) async {
+    final generation = ++_queryGeneration;
     if (isFileSource) {
       return _initPlayerIfNeeded(autoFullScreenFlag);
     }
@@ -895,18 +931,32 @@ class VideoDetailController extends GetxController
       // 并发请求会让本次初始化直接返回，恢复守卫不能一直挂着，
       // 否则之后主动换清晰度时会被误判成"复用现有媒体"而跳过重建
       isRestoringFromPip = false;
+      _queryPending = true;
       return;
     }
     isQuerying = true;
     try {
-      await _queryVideoUrl(fromReset, autoFullScreenFlag);
+      await _queryVideoUrl(fromReset, autoFullScreenFlag, generation);
     } finally {
       isQuerying = false;
+      if (_queryPending && !isClosed) {
+        _queryPending = false;
+        unawaited(
+          queryVideoUrl(
+            fromReset: fromReset,
+            autoFullScreenFlag: autoFullScreenFlag,
+          ),
+        );
+      }
     }
   }
 
   @pragma('vm:prefer-inline')
-  Future<void> _queryVideoUrl(bool fromReset, bool autoFullScreenFlag) async {
+  Future<void> _queryVideoUrl(
+    bool fromReset,
+    bool autoFullScreenFlag,
+    int generation,
+  ) async {
     if (plPlayerController.enableSponsorBlock && isBlock && !fromReset) {
       querySponsorBlock(bvid: bvid, cid: cid.value);
     }
@@ -922,7 +972,9 @@ class VideoDetailController extends GetxController
       preferCodecs = isWiFi ? Pref.preferCodecs : Pref.preferCodecsCellular;
     }
 
-    final result = await _getVideoUrl(VideoQuality.hdrVivid.code);
+    final result = await _getVideoUrlWithRetry(VideoQuality.hdrVivid.code);
+
+    if (generation != _queryGeneration) return;
 
     if (result case Success(:final response)) {
       data = response;
@@ -995,6 +1047,7 @@ class VideoDetailController extends GetxController
           await _initPlayerIfNeeded(autoFullScreenFlag);
           return;
         } else {
+          videoPlayerServiceHandler?.endTransition(playing: false);
           SmartDialog.showToast('视频资源不存在');
           if (isRestoringFromPip) {
             // 播放器仍持有有效数据源，只是元数据刷新失败，保留播放状态
@@ -1067,6 +1120,7 @@ class VideoDetailController extends GetxController
       }
       await _initPlayerIfNeeded(autoFullScreenFlag);
     } else {
+      videoPlayerServiceHandler?.endTransition(playing: false);
       if (isRestoringFromPip) {
         // 播放器仍在正常播放，只是元数据刷新失败；不能因此把已有的
         // 播放器区域销毁。消费掉恢复标志，后续操作回到常规流程。

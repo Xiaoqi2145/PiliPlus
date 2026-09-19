@@ -499,8 +499,9 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
         }
       }
 
+      videoPlayerServiceHandler?.beginTransition();
       videoDetailCtr
-        ..plPlayerController.pause()
+        ..plPlayerController.pause(isInterrupt: true)
         ..makeHeartBeat()
         ..updateMediaListHistory(aid)
         ..onReset(isStein: isStein)
@@ -557,6 +558,7 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       queryOnlineTotal();
       return true;
     } catch (e) {
+      videoPlayerServiceHandler?.endTransition(playing: false);
       if (kDebugMode) debugPrint('ugc onChangeEpisode: $e');
       return false;
     }

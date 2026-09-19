@@ -268,8 +268,9 @@ class PgcIntroController extends CommonIntroController {
       this.epId = epId;
       this.bvid = bvid;
 
+      videoPlayerServiceHandler?.beginTransition();
       videoDetailCtr
-        ..plPlayerController.pause()
+        ..plPlayerController.pause(isInterrupt: true)
         ..makeHeartBeat()
         ..onReset()
         ..epId = epId
@@ -302,6 +303,7 @@ class PgcIntroController extends CommonIntroController {
       queryVideoIntro(episode as EpisodeItem);
       return true;
     } catch (e) {
+      videoPlayerServiceHandler?.endTransition(playing: false);
       if (kDebugMode) debugPrint('pgc onChangeEpisode: $e');
       return false;
     }

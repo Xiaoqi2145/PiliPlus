@@ -562,6 +562,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       }
 
       if (exitFlag) {
+        videoPlayerServiceHandler?.endTransition(playing: false);
         if (autoExitFullscreen) {
           plPlayerController!.triggerFullScreen(status: false);
           if (plPlayerController!.controlsLock.value) {

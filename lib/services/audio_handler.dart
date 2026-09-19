@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show File, Platform;
 import 'dart:ui' show PlatformDispatcher;
 
@@ -41,6 +42,11 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   Future<void>? Function()? onPlay;
   Future<void>? Function()? onPause;
   Future<void>? Function(Duration position)? onSeek;
+
+  bool _isTransitioning = false;
+  Timer? _pauseTimer;
+  Timer? _transitionTimer;
+  int _transitionGeneration = 0;
 
   @override
   Future<void> play() {
@@ -95,10 +101,10 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
       processingState = AudioProcessingState.ready;
     }
 
-    final playing = status.isPlaying;
+    final playing = _isTransitioning || status.isPlaying;
     playbackState.add(
       playbackState.value.copyWith(
-        processingState: isBuffering
+        processingState: _isTransitioning || isBuffering
             ? AudioProcessingState.buffering
             : processingState,
         controls: [
@@ -146,7 +152,55 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     if (!enableBackgroundPlay) return;
 
     if (_item.isEmpty) return;
-    setPlaybackState(status, isBuffering, isLive);
+    _pauseTimer?.cancel();
+    if (!status.isPlaying && !isBuffering && !_isTransitioning) {
+      // A media_kit playing=false can arrive just before completed. Delay the
+      // paused publication so an automatic item transition can keep the
+      // foreground service alive.
+      _pauseTimer = Timer(const Duration(milliseconds: 450), () {
+        if (!_isTransitioning) setPlaybackState(status, false, isLive);
+      });
+    } else {
+      setPlaybackState(status, isBuffering, isLive);
+    }
+  }
+
+  /// Keep the notification/foreground service active while the next media
+  /// item is being resolved. This is intentionally separate from user pause.
+  void beginTransition() {
+    if (!enableBackgroundPlay || _item.isEmpty) return;
+    _pauseTimer?.cancel();
+    _isTransitioning = true;
+    final generation = ++_transitionGeneration;
+    _transitionTimer?.cancel();
+    _transitionTimer = Timer(const Duration(seconds: 30), () {
+      if (generation == _transitionGeneration) {
+        endTransition(playing: false);
+      }
+    });
+    playbackState.add(
+      playbackState.value.copyWith(
+        processingState: AudioProcessingState.buffering,
+        playing: true,
+      ),
+    );
+  }
+
+  void endTransition({required bool playing}) {
+    if (!_isTransitioning) return;
+    _transitionGeneration++;
+    _transitionTimer?.cancel();
+    _transitionTimer = null;
+    _isTransitioning = false;
+    if (!enableBackgroundPlay || _item.isEmpty) return;
+    playbackState.add(
+      playbackState.value.copyWith(
+        processingState: playing
+            ? AudioProcessingState.ready
+            : AudioProcessingState.idle,
+        playing: playing,
+      ),
+    );
   }
 
   void onVideoDetailChange(
@@ -265,6 +319,9 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   void clear() {
     if (!enableBackgroundPlay) return;
+    _pauseTimer?.cancel();
+    _transitionTimer?.cancel();
+    _isTransitioning = false;
     mediaItem.add(null);
     _item.clear();
     /**
