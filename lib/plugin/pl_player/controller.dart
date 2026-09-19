@@ -664,7 +664,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       cancelLongPressTimer();
       if (_videoPlayerController != null &&
           _videoPlayerController!.state.playing) {
-        await pause(notify: false);
+        // setDataSource is also used for automatic next-item transitions.
+        // Keep the playback intent and audio focus while the media source is
+        // being replaced; a normal pause here releases focus and clears
+        // _playIntent, which can make background playback stop during the
+        // short gap between two videos.
+        await pause(notify: false, isInterrupt: true);
       }
 
       if (_playerCount == 0) {
