@@ -1229,15 +1229,21 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   LongPressGestureRecognizer? _longPressRecognizer;
   LongPressGestureRecognizer get longPressRecognizer => _longPressRecognizer ??=
       LongPressGestureRecognizer(
-          duration: plPlayerController.enableTapDm
+          duration: Platform.isAndroid
+              ? const Duration(milliseconds: 300)
+              : plPlayerController.enableTapDm
               ? const Duration(milliseconds: 300)
               : null,
         )
-        ..onLongPressStart = ((_) =>
-            plPlayerController.setLongPressStatus(true))
-        ..onLongPressEnd = ((_) => plPlayerController.setLongPressStatus(false))
-        ..onLongPressCancel = (() =>
-            plPlayerController.setLongPressStatus(false));
+        ..onLongPressStart = ((_) {
+          unawaited(plPlayerController.setLongPressStatus(true));
+        })
+        ..onLongPressEnd = ((_) {
+          unawaited(plPlayerController.setLongPressStatus(false));
+        })
+        ..onLongPressCancel = (() {
+          unawaited(plPlayerController.setLongPressStatus(false));
+        });
   late final ImmediateTapGestureRecognizer _tapGestureRecognizer;
   late final DoubleTapGestureRecognizer _doubleTapGestureRecognizer;
   late final PlayerScaleGestureRecognizer _scaleGestureRecognizer;
@@ -1272,6 +1278,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
     final controlsUnlock = !plPlayerController.controlsLock.value;
     if (PlatformUtils.isMobile) {
+      plPlayerController.traceLongPressPointerDown();
       _tapGestureRecognizer.addPointer(event);
       if (controlsUnlock) {
         if (!plPlayerController.isLive) {

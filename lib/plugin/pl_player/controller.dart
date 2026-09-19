@@ -1,4 +1,4 @@
-import 'dart:async' show StreamSubscription, Timer;
+import 'dart:async' show Completer, StreamSubscription, Timer, unawaited;
 import 'dart:convert' show ascii, utf8;
 import 'dart:io' show Platform;
 import 'dart:math' show max, min;
@@ -51,7 +51,7 @@ import 'package:PiliPlus/utils/utils.dart';
 import 'package:archive/archive.dart' show getCrc32;
 import 'package:canvas_danmaku/canvas_danmaku.dart';
 import 'package:easy_debounce/easy_throttle.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter/services.dart' show HapticFeedback, DeviceOrientation;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -67,6 +67,23 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
 typedef PlayCallback = Future<void>? Function();
+
+class _RateRequest {
+  _RateRequest({
+    required this.speed,
+    required this.updateNormalSpeed,
+    required this.source,
+    required this.requestId,
+    this.sessionId,
+  });
+
+  final double speed;
+  final bool updateNormalSpeed;
+  final String source;
+  final int requestId;
+  final int? sessionId;
+  final completer = Completer<void>();
+}
 
 class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Player? _videoPlayerController;
@@ -105,6 +122,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   late double lastPlaybackSpeed = 1.0;
   final RxDouble _playbackSpeed = Pref.playSpeedDefault.obs;
   late final RxDouble _longPressSpeed = Pref.longPressSpeedDefault.obs;
+  double _normalPlaybackSpeed = Pref.playSpeedDefault;
+  double _appliedPlaybackSpeed = Pref.playSpeedDefault;
+
+  _RateRequest? _pendingRateRequest;
+  Future<void>? _rateWorker;
+  bool _rateCoordinatorDisposed = false;
+  int _rateRequestId = 0;
+
+  int _longPressGeneration = 0;
+  int? _longPressTraceSession;
+  double? _longPressBaseSpeed;
+  bool _longPressSessionActive = false;
+  final Stopwatch _rateTraceClock = Stopwatch()..start();
 
   final RxDouble volume = RxDouble(
     PlatformUtils.isDesktop ? Pref.desktopVolume : 1.0,
@@ -1000,9 +1030,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       stream.duration.listen(updateDuration),
       stream.buffer.listen((Duration buffer) {
         buffered.value = buffer.inSeconds;
+        if (_longPressTraceSession != null) {
+          _traceLongPressRate(
+            'buffer',
+            bufferSeconds: buffer.inMilliseconds / 1000,
+          );
+        }
       }),
       stream.buffering.listen((bool buffering) {
         isBuffering.value = buffering;
+        if (_longPressTraceSession != null) {
+          _traceLongPressRate(buffering ? 'bufferingStart' : 'bufferingEnd');
+        }
         videoPlayerServiceHandler?.onStatusChange(
           playerStatus.value,
           buffering,
@@ -1162,34 +1201,236 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   /// 设置倍速
   Future<void> setPlaybackSpeed(double speed) async {
-    lastPlaybackSpeed = playbackSpeed;
+    _cancelLongPressSessionForNormalRateChange();
+    if (speed.isFinite && speed > 0) {
+      _normalPlaybackSpeed = speed;
+    }
+    await _requestPlaybackRate(
+      speed,
+      updateNormalSpeed: true,
+      source: 'normal',
+    );
+  }
 
-    if (speed == _videoPlayerController?.state.rate) {
-      return;
+  // 还原默认速度
+  double playSpeedDefault = Pref.playSpeedDefault;
+  Future<void> setDefaultSpeed() async {
+    _cancelLongPressSessionForNormalRateChange();
+    _normalPlaybackSpeed = playSpeedDefault;
+    await _requestPlaybackRate(
+      playSpeedDefault,
+      updateNormalSpeed: true,
+      source: 'default',
+    );
+  }
+
+  void _cancelLongPressSessionForNormalRateChange() {
+    if (!_longPressSessionActive && !longPressStatus.value) return;
+    _longPressGeneration++;
+    _longPressSessionActive = false;
+    _longPressBaseSpeed = null;
+    _longPressTraceSession = null;
+    longPressStatus.value = false;
+  }
+
+  Future<void> _requestPlaybackRate(
+    double speed, {
+    required bool updateNormalSpeed,
+    required String source,
+    int? sessionId,
+  }) {
+    if (!speed.isFinite || speed <= 0) {
+      return Future.value();
+    }
+    if (_rateCoordinatorDisposed) {
+      return Future.value();
     }
 
-    await _videoPlayerController?.setRate(speed);
-    _playbackSpeed.value = speed;
-    if (danmakuController != null) {
+    final requestId = ++_rateRequestId;
+    final request = _RateRequest(
+      speed: speed,
+      updateNormalSpeed: updateNormalSpeed,
+      source: source,
+      requestId: requestId,
+      sessionId: sessionId,
+    );
+    final previous = _pendingRateRequest;
+    _pendingRateRequest = request;
+    // A pending request is deliberately latest-wins. Its caller has no useful
+    // work left to wait for because the newer request superseded its target.
+    if (previous != null && !previous.completer.isCompleted) {
+      previous.completer.complete();
+    }
+    _traceLongPressRate(
+      'rateRequest',
+      requestId: requestId,
+      target: speed,
+      source: source,
+      sessionId: sessionId,
+    );
+    _rateWorker ??= _drainRateRequests();
+    return request.completer.future;
+  }
+
+  Future<void> _drainRateRequests() async {
+    while (!_rateCoordinatorDisposed) {
+      final request = _pendingRateRequest;
+      if (request == null) break;
+      _pendingRateRequest = null;
+      final requestId = request.requestId;
+      final player = _videoPlayerController;
+      if (player == null || _playerCount == 0) {
+        if (request.sessionId != null &&
+            request.sessionId == _longPressGeneration) {
+          longPressStatus.value = false;
+          _longPressSessionActive = false;
+          _longPressBaseSpeed = null;
+          _longPressTraceSession = null;
+        }
+        _completeRateRequest(request);
+        continue;
+      }
+
       try {
-        DanmakuOption currentOption = danmakuController!.option;
-        double defaultDuration = currentOption.duration * lastPlaybackSpeed;
-        double defaultStaticDuration =
-            currentOption.staticDuration * lastPlaybackSpeed;
-        DanmakuOption updatedOption = currentOption.copyWith(
-          duration: defaultDuration / speed,
-          staticDuration: defaultStaticDuration / speed,
+        final currentRate = player.state.rate;
+        if ((currentRate - request.speed).abs() >= 0.0001) {
+          _traceLongPressRate(
+            'setRateStart',
+            requestId: requestId,
+            target: request.speed,
+            source: request.source,
+            sessionId: request.sessionId,
+          );
+          await player.setRate(request.speed);
+          _traceLongPressRate(
+            'setRateDone',
+            requestId: requestId,
+            target: request.speed,
+            source: request.source,
+            sessionId: request.sessionId,
+          );
+        }
+
+        final actualRate = player.state.rate > 0
+            ? player.state.rate
+            : request.speed;
+        _commitPlaybackRate(
+          actualRate,
+          updateNormalSpeed: request.updateNormalSpeed,
+        );
+        _traceLongPressRate(
+          'state.rate',
+          requestId: requestId,
+          target: actualRate,
+          source: request.source,
+          sessionId: request.sessionId,
+        );
+        if (request.source == 'longPressRestoreAfterError' &&
+            request.sessionId == _longPressGeneration) {
+          _longPressTraceSession = null;
+          _traceLongPressRate(
+            'restoreDone',
+            requestId: requestId,
+            target: actualRate,
+            source: request.source,
+            sessionId: request.sessionId,
+          );
+        }
+      } catch (error, stackTrace) {
+        if (kDebugMode) {
+          debugPrint('playback rate change failed: $error\n$stackTrace');
+        }
+        _traceLongPressRate(
+          'setRateError',
+          requestId: requestId,
+          target: request.speed,
+          source: request.source,
+          sessionId: request.sessionId,
+        );
+        if (request.updateNormalSpeed &&
+            _normalPlaybackSpeed == request.speed) {
+          _normalPlaybackSpeed = _appliedPlaybackSpeed;
+        }
+        if (request.sessionId != null &&
+            request.sessionId == _longPressGeneration) {
+          final restoreSpeed = _longPressBaseSpeed;
+          final restoreSession = ++_longPressGeneration;
+          longPressStatus.value = false;
+          _longPressSessionActive = false;
+          _longPressBaseSpeed = null;
+          _longPressTraceSession = restoreSession;
+          if (restoreSpeed != null) {
+            unawaited(
+              _requestPlaybackRate(
+                restoreSpeed,
+                updateNormalSpeed: false,
+                source: 'longPressRestoreAfterError',
+                sessionId: restoreSession,
+              ),
+            );
+          } else {
+            _longPressTraceSession = null;
+          }
+        }
+      } finally {
+        _completeRateRequest(request);
+      }
+    }
+    _rateWorker = null;
+  }
+
+  void _completeRateRequest(_RateRequest request) {
+    if (!request.completer.isCompleted) {
+      request.completer.complete();
+    }
+  }
+
+  void _commitPlaybackRate(
+    double speed, {
+    required bool updateNormalSpeed,
+  }) {
+    final previousSpeed = _appliedPlaybackSpeed;
+    lastPlaybackSpeed = previousSpeed;
+    _appliedPlaybackSpeed = speed;
+    _playbackSpeed.value = speed;
+    if (updateNormalSpeed) {
+      _normalPlaybackSpeed = speed;
+    }
+    if (danmakuController != null && previousSpeed != speed) {
+      try {
+        final currentOption = danmakuController!.option;
+        final updatedOption = currentOption.copyWith(
+          duration: currentOption.duration * previousSpeed / speed,
+          staticDuration: currentOption.staticDuration * previousSpeed / speed,
         );
         danmakuController!.updateOption(updatedOption);
       } catch (_) {}
     }
   }
 
-  // 还原默认速度
-  double playSpeedDefault = Pref.playSpeedDefault;
-  Future<void> setDefaultSpeed() async {
-    await _videoPlayerController?.setRate(playSpeedDefault);
-    _playbackSpeed.value = playSpeedDefault;
+  void _traceLongPressRate(
+    String event, {
+    int? requestId,
+    double? target,
+    double? bufferSeconds,
+    String? source,
+    int? sessionId,
+  }) {
+    if (!kDebugMode || !Platform.isAndroid) return;
+    final details = <String>[
+      't=${_rateTraceClock.elapsedMilliseconds}ms',
+      'event=$event',
+      if (requestId != null) 'request=$requestId',
+      if (sessionId != null) 'session=$sessionId',
+      if (target != null) 'target=${target.toStringAsFixed(2)}',
+      if (bufferSeconds != null) 'buffer=${bufferSeconds.toStringAsFixed(2)}s',
+      if (source != null) 'source=$source',
+    ].join(' ');
+    debugPrint('[LongPressRate] $details');
+  }
+
+  void traceLongPressPointerDown() {
+    _traceLongPressRate('pointerDown');
   }
 
   /// 播放视频
@@ -1347,17 +1588,59 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     if (val) {
-      if (playerStatus.isPlaying) {
-        longPressStatus.value = val;
-        HapticFeedback.lightImpact();
-        await setPlaybackSpeed(
-          enableAutoLongPressSpeed ? playbackSpeed * 2 : longPressSpeed,
+      if (!playerStatus.isPlaying) return;
+
+      final sessionId = ++_longPressGeneration;
+      final baseSpeed = _normalPlaybackSpeed;
+      final targetSpeed = enableAutoLongPressSpeed
+          ? baseSpeed * 2
+          : longPressSpeed;
+      _longPressBaseSpeed = baseSpeed;
+      _longPressSessionActive = true;
+      _longPressTraceSession = sessionId;
+      longPressStatus.value = true;
+      HapticFeedback.lightImpact();
+      _traceLongPressRate(
+        'longPressStart',
+        target: targetSpeed,
+        source: 'longPress',
+        sessionId: sessionId,
+      );
+      await _requestPlaybackRate(
+        targetSpeed,
+        updateNormalSpeed: false,
+        source: 'longPress',
+        sessionId: sessionId,
+      );
+    } else {
+      if (!_longPressSessionActive && !longPressStatus.value) return;
+
+      final sessionId = ++_longPressGeneration;
+      final restoreSpeed = _longPressBaseSpeed ?? _normalPlaybackSpeed;
+      _longPressSessionActive = false;
+      longPressStatus.value = val;
+      _traceLongPressRate(
+        'longPressEnd',
+        target: restoreSpeed,
+        source: 'longPressRestore',
+        sessionId: sessionId,
+      );
+      await _requestPlaybackRate(
+        restoreSpeed,
+        updateNormalSpeed: false,
+        source: 'longPressRestore',
+        sessionId: sessionId,
+      );
+      if (sessionId == _longPressGeneration) {
+        _longPressBaseSpeed = null;
+        _longPressTraceSession = null;
+        _traceLongPressRate(
+          'restoreDone',
+          target: restoreSpeed,
+          source: 'longPressRestore',
+          sessionId: sessionId,
         );
       }
-    } else {
-      // if (kDebugMode) debugPrint('$playbackSpeed');
-      longPressStatus.value = val;
-      await setPlaybackSpeed(lastPlaybackSpeed);
     }
   }
 
@@ -1631,6 +1914,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _playerCount -= 1;
       _heartDuration = 0;
       return;
+    }
+
+    _rateCoordinatorDisposed = true;
+    _longPressGeneration++;
+    _longPressSessionActive = false;
+    _longPressBaseSpeed = null;
+    _longPressTraceSession = null;
+    longPressStatus.value = false;
+    final pendingRateRequest = _pendingRateRequest;
+    _pendingRateRequest = null;
+    if (pendingRateRequest != null) {
+      _completeRateRequest(pendingRateRequest);
     }
 
     _playerCount = 0;
