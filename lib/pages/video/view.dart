@@ -711,13 +711,18 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
     if (plPlayerController != null) {
       videoDetailController.makeHeartBeat();
-      plPlayerController!
-        ..removeStatusLister(playerListener)
-        ..removePositionListener(positionListener);
-
-      if (willStartPip) {
-        _startInAppPipIfNeeded();
-      } else if (!shouldKeepAlive) {
+      if (shouldKeepAlive) {
+        // The hidden video page remains the owner of automatic list playback
+        // while the in-app PiP overlay is active. Keep the listeners attached
+        // so completion can still call introController.nextPlay() in the
+        // background; removing them here leaves the PiP player stuck at EOF.
+        if (willStartPip) {
+          _startInAppPipIfNeeded();
+        }
+      } else {
+        plPlayerController!
+          ..removeStatusLister(playerListener)
+          ..removePositionListener(positionListener);
         // 只有在确定不进入小窗时才暂停播放
         plPlayerController!.pause();
       }
