@@ -119,14 +119,22 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   int _playerCount = 0;
 
-  late double lastPlaybackSpeed = 1.0;
   final RxDouble _playbackSpeed = Pref.playSpeedDefault.obs;
-  late final RxDouble _longPressSpeed = Pref.longPressSpeedDefault.obs;
   double _normalPlaybackSpeed = Pref.playSpeedDefault;
   double _appliedPlaybackSpeed = Pref.playSpeedDefault;
 
+  /// The rate a long press is currently holding, or null when no long-press
+  /// session is active. Stored rather than recomputed so the on-screen toast
+  /// and the rate actually requested can never disagree.
+  double? _longPressTargetSpeed;
+
   _RateRequest? _pendingRateRequest;
-  Future<void>? _rateWorker;
+  // Latches whether the drain loop is currently running. This must NOT be
+  // derived from the worker's Future: a request whose target rate already
+  // matches the player's rate skips the only `await` in the loop, so the
+  // worker completes synchronously and its (already finished) Future would
+  // be latched as "running", permanently wedging every later rate change.
+  bool _rateWorkerActive = false;
   bool _rateCoordinatorDisposed = false;
   int _rateRequestId = 0;
 
@@ -196,8 +204,24 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// 视频播放速度
   double get playbackSpeed => _playbackSpeed.value;
 
-  // 长按倍速
-  double get longPressSpeed => _longPressSpeed.value;
+  /// 长按倍速目标值。
+  ///
+  /// 长按进行中返回本次会话锁定的目标，否则按当前设置实时计算，因此
+  /// 设置页改动无需重建播放器即可生效。toast 与真正下发的倍速共用此值。
+  double get longPressSpeed {
+    if (_longPressTargetSpeed case final target?) {
+      return target;
+    }
+    return _resolveLongPressTargetSpeed();
+  }
+
+  /// 按当前设置计算长按目标倍速（不涉及会话状态）。
+  double _resolveLongPressTargetSpeed() {
+    if (Pref.enableAutoLongPressSpeed) {
+      return _normalPlaybackSpeed * 2;
+    }
+    return Pref.longPressSpeedDefault;
+  }
 
   /// [videoPlayerController] instance of Player
   Player? get videoPlayerController => _videoPlayerController;
@@ -361,7 +385,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   late final RxDouble danmakuOpacity = Pref.danmakuOpacity.obs;
 
   late List<double> speedList = Pref.speedList;
-  late bool enableAutoLongPressSpeed = Pref.enableAutoLongPressSpeed;
   late final showControlDuration = Pref.enableLongShowControl
       ? const Duration(seconds: 30)
       : const Duration(seconds: 3);
@@ -488,7 +511,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   static PlayCallback? _playCallBack;
 
   static Future<void>? playIfExists() {
-    return _playCallBack?.call();
+    // The page callback is only an enhancement (it re-attaches page listeners
+    // and can start an item that is not loaded yet).  It must never swallow a
+    // play request: the callback is registered in the page's initState and
+    // cleared again on pop or when the in-app PiP window closes, so a play
+    // command from the media notification or a headset button would otherwise
+    // fall through to nothing and only start working after returning to the
+    // player page.
+    if (_playCallBack?.call() case final callback?) {
+      return callback;
+    }
+    final player = _instance;
+    if (player == null ||
+        player._playerCount == 0 ||
+        player.videoPlayerController == null) {
+      return null;
+    }
+    // Keep the in-page control bar hidden: this path serves media notification
+    // and headset commands, which must not reveal the on-screen controls.
+    return player.play(hideControls: false);
   }
 
   // try to get PlayerStatus
@@ -691,7 +732,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (showSeekPreview) {
         _clearPreview();
       }
-      cancelLongPressTimer();
+      cancelKeyGestureTimers();
+      // 切集/换清晰度会重建媒体源。长按会话若跨越这次切换，其锁定目标与
+      // 基准倍速都已失效，必须在这里结束，否则 _initializePlayer 会把
+      // 提升后的倍速当作新的常规倍速写下去。
+      _cancelLongPressSessionForNormalRateChange();
       if (_videoPlayerController != null &&
           _videoPlayerController!.state.playing) {
         // setDataSource is also used for automatic next-item transitions.
@@ -917,8 +962,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (isLive) {
       await setPlaybackSpeed(1.0);
     } else {
-      if (_videoPlayerController?.state.rate != _playbackSpeed.value) {
-        await setPlaybackSpeed(_playbackSpeed.value);
+      // 用常规倍速而非 _playbackSpeed：后者在长按会话期间是提升后的值，
+      // 新建媒体源不应继承它。
+      if (_videoPlayerController?.state.rate != _normalPlaybackSpeed) {
+        await setPlaybackSpeed(_normalPlaybackSpeed);
       }
     }
     _initVideoFit();
@@ -1212,23 +1259,21 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     );
   }
 
-  // 还原默认速度
-  double playSpeedDefault = Pref.playSpeedDefault;
-  Future<void> setDefaultSpeed() async {
-    _cancelLongPressSessionForNormalRateChange();
-    _normalPlaybackSpeed = playSpeedDefault;
-    await _requestPlaybackRate(
-      playSpeedDefault,
-      updateNormalSpeed: true,
-      source: 'default',
-    );
-  }
-
   void _cancelLongPressSessionForNormalRateChange() {
     if (!_longPressSessionActive && !longPressStatus.value) return;
     _longPressGeneration++;
+    _clearLongPressSession();
+  }
+
+  /// Drops every trace of an in-flight long-press session.
+  ///
+  /// Kept in one place so a newly added session field cannot be forgotten in
+  /// one of the several teardown paths (normal rate change, media source
+  /// switch, setRate failure, release, dispose).
+  void _clearLongPressSession() {
     _longPressSessionActive = false;
     _longPressBaseSpeed = null;
+    _longPressTargetSpeed = null;
     _longPressTraceSession = null;
     longPressStatus.value = false;
   }
@@ -1268,115 +1313,129 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       source: source,
       sessionId: sessionId,
     );
-    _rateWorker ??= _drainRateRequests();
+    _ensureRateWorker();
     return request.completer.future;
   }
 
+  /// Starts the drain loop unless it is already running.
+  ///
+  /// The latch is a plain bool rather than the worker's [Future] on purpose:
+  /// see [_rateWorkerActive].
+  void _ensureRateWorker() {
+    if (_rateWorkerActive) return;
+    _rateWorkerActive = true;
+    unawaited(_drainRateRequests());
+  }
+
   Future<void> _drainRateRequests() async {
-    while (!_rateCoordinatorDisposed) {
-      final request = _pendingRateRequest;
-      if (request == null) break;
-      _pendingRateRequest = null;
-      final requestId = request.requestId;
-      final player = _videoPlayerController;
-      if (player == null || _playerCount == 0) {
-        if (request.sessionId != null &&
-            request.sessionId == _longPressGeneration) {
-          longPressStatus.value = false;
-          _longPressSessionActive = false;
-          _longPressBaseSpeed = null;
-          _longPressTraceSession = null;
-        }
-        _completeRateRequest(request);
-        continue;
-      }
-
-      try {
-        final currentRate = player.state.rate;
-        if ((currentRate - request.speed).abs() >= 0.0001) {
-          _traceLongPressRate(
-            'setRateStart',
-            requestId: requestId,
-            target: request.speed,
-            source: request.source,
-            sessionId: request.sessionId,
-          );
-          await player.setRate(request.speed);
-          _traceLongPressRate(
-            'setRateDone',
-            requestId: requestId,
-            target: request.speed,
-            source: request.source,
-            sessionId: request.sessionId,
-          );
+    // The cleanup below must stay inside this function, directly around the
+    // loop: hoisting the loop into a separate async method would insert an
+    // `await` between the loop exiting and the latch being cleared, leaving
+    // requests queued during that window stranded.
+    try {
+      while (!_rateCoordinatorDisposed) {
+        final request = _pendingRateRequest;
+        if (request == null) break;
+        _pendingRateRequest = null;
+        final requestId = request.requestId;
+        final player = _videoPlayerController;
+        if (player == null || _playerCount == 0) {
+          if (request.sessionId != null &&
+              request.sessionId == _longPressGeneration) {
+            _clearLongPressSession();
+          }
+          _completeRateRequest(request);
+          continue;
         }
 
-        final actualRate = player.state.rate > 0
-            ? player.state.rate
-            : request.speed;
-        _commitPlaybackRate(
-          actualRate,
-          updateNormalSpeed: request.updateNormalSpeed,
-        );
-        _traceLongPressRate(
-          'state.rate',
-          requestId: requestId,
-          target: actualRate,
-          source: request.source,
-          sessionId: request.sessionId,
-        );
-        if (request.source == 'longPressRestoreAfterError' &&
-            request.sessionId == _longPressGeneration) {
-          _longPressTraceSession = null;
+        try {
+          final currentRate = player.state.rate;
+          if ((currentRate - request.speed).abs() >= 0.0001) {
+            _traceLongPressRate(
+              'setRateStart',
+              requestId: requestId,
+              target: request.speed,
+              source: request.source,
+              sessionId: request.sessionId,
+            );
+            await player.setRate(request.speed);
+            _traceLongPressRate(
+              'setRateDone',
+              requestId: requestId,
+              target: request.speed,
+              source: request.source,
+              sessionId: request.sessionId,
+            );
+          }
+
+          final actualRate = player.state.rate > 0
+              ? player.state.rate
+              : request.speed;
+          _commitPlaybackRate(
+            actualRate,
+            updateNormalSpeed: request.updateNormalSpeed,
+          );
           _traceLongPressRate(
-            'restoreDone',
+            'state.rate',
             requestId: requestId,
             target: actualRate,
             source: request.source,
             sessionId: request.sessionId,
           );
-        }
-      } catch (error, stackTrace) {
-        if (kDebugMode) {
-          debugPrint('playback rate change failed: $error\n$stackTrace');
-        }
-        _traceLongPressRate(
-          'setRateError',
-          requestId: requestId,
-          target: request.speed,
-          source: request.source,
-          sessionId: request.sessionId,
-        );
-        if (request.updateNormalSpeed &&
-            _normalPlaybackSpeed == request.speed) {
-          _normalPlaybackSpeed = _appliedPlaybackSpeed;
-        }
-        if (request.sessionId != null &&
-            request.sessionId == _longPressGeneration) {
-          final restoreSpeed = _longPressBaseSpeed;
-          final restoreSession = ++_longPressGeneration;
-          longPressStatus.value = false;
-          _longPressSessionActive = false;
-          _longPressBaseSpeed = null;
-          _longPressTraceSession = restoreSession;
-          if (restoreSpeed != null) {
-            unawaited(
-              _requestPlaybackRate(
-                restoreSpeed,
-                updateNormalSpeed: false,
-                source: 'longPressRestoreAfterError',
-                sessionId: restoreSession,
-              ),
-            );
-          } else {
+          if (request.source == 'longPressRestoreAfterError' &&
+              request.sessionId == _longPressGeneration) {
             _longPressTraceSession = null;
+            _traceLongPressRate(
+              'restoreDone',
+              requestId: requestId,
+              target: actualRate,
+              source: request.source,
+              sessionId: request.sessionId,
+            );
           }
+        } catch (error, stackTrace) {
+          if (kDebugMode) {
+            debugPrint('playback rate change failed: $error\n$stackTrace');
+          }
+          _traceLongPressRate(
+            'setRateError',
+            requestId: requestId,
+            target: request.speed,
+            source: request.source,
+            sessionId: request.sessionId,
+          );
+          if (request.updateNormalSpeed &&
+              _normalPlaybackSpeed == request.speed) {
+            _normalPlaybackSpeed = _appliedPlaybackSpeed;
+          }
+          if (request.sessionId != null &&
+              request.sessionId == _longPressGeneration) {
+            final restoreSpeed = _longPressBaseSpeed;
+            final restoreSession = ++_longPressGeneration;
+            _clearLongPressSession();
+            _longPressTraceSession = restoreSession;
+            if (restoreSpeed != null) {
+              unawaited(
+                _requestPlaybackRate(
+                  restoreSpeed,
+                  updateNormalSpeed: false,
+                  source: 'longPressRestoreAfterError',
+                  sessionId: restoreSession,
+                ),
+              );
+            } else {
+              _longPressTraceSession = null;
+            }
+          }
+        } finally {
+          _completeRateRequest(request);
         }
-      } finally {
-        _completeRateRequest(request);
       }
+    } finally {
+      // Cleared unconditionally so an unexpected throw can never wedge the
+      // latch and silently disable every later playback-rate change.
+      _rateWorkerActive = false;
     }
-    _rateWorker = null;
   }
 
   void _completeRateRequest(_RateRequest request) {
@@ -1390,7 +1449,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     required bool updateNormalSpeed,
   }) {
     final previousSpeed = _appliedPlaybackSpeed;
-    lastPlaybackSpeed = previousSpeed;
     _appliedPlaybackSpeed = speed;
     _playbackSpeed.value = speed;
     if (updateNormalSpeed) {
@@ -1576,12 +1634,28 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     longPressTimer = null;
   }
 
+  /// 音量键连发计时器。与 [longPressTimer]（长按 → 加速）分开持有：
+  /// 两者是不同的按键手势，共用一个字段会导致按住音量键时 → 被静默取消。
+  Timer? volumeKeyRepeatTimer;
+  void cancelVolumeKeyRepeatTimer() {
+    volumeKeyRepeatTimer?.cancel();
+    volumeKeyRepeatTimer = null;
+  }
+
+  /// 取消全部按键手势计时器，用于媒体源切换与销毁。
+  void cancelKeyGestureTimers() {
+    cancelLongPressTimer();
+    cancelVolumeKeyRepeatTimer();
+  }
+
   /// 设置长按倍速状态 live模式下禁用
   Future<void> setLongPressStatus(bool val) async {
     if (isLive) {
       return;
     }
-    if (controlsLock.value) {
+    // controlsLock 只阻止长按「开始」。会话一旦建立就必须能结束，否则锁屏
+    // 恰好发生在长按期间会把提升后的倍速永久留在播放器上。
+    if (val && controlsLock.value) {
       return;
     }
     if (longPressStatus.value == val) {
@@ -1592,10 +1666,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       final sessionId = ++_longPressGeneration;
       final baseSpeed = _normalPlaybackSpeed;
-      final targetSpeed = enableAutoLongPressSpeed
-          ? baseSpeed * 2
-          : longPressSpeed;
+      final targetSpeed = _resolveLongPressTargetSpeed();
       _longPressBaseSpeed = baseSpeed;
+      // Published before longPressStatus flips so the toast and the requested
+      // rate are derived from one and the same value.
+      _longPressTargetSpeed = targetSpeed;
       _longPressSessionActive = true;
       _longPressTraceSession = sessionId;
       longPressStatus.value = true;
@@ -1633,6 +1708,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       );
       if (sessionId == _longPressGeneration) {
         _longPressBaseSpeed = null;
+        _longPressTargetSpeed = null;
         _longPressTraceSession = null;
         _traceLongPressRate(
           'restoreDone',
@@ -1908,7 +1984,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void dispose() {
     // 每次减1，最后销毁
     resetScreenRotation();
-    cancelLongPressTimer();
+    cancelKeyGestureTimers();
     _cancelSubForSeek();
     if (!_isCloseAll && _playerCount > 1) {
       _playerCount -= 1;
@@ -1918,10 +1994,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     _rateCoordinatorDisposed = true;
     _longPressGeneration++;
-    _longPressSessionActive = false;
-    _longPressBaseSpeed = null;
-    _longPressTraceSession = null;
-    longPressStatus.value = false;
+    _clearLongPressSession();
     final pendingRateRequest = _pendingRateRequest;
     _pendingRateRequest = null;
     if (pendingRateRequest != null) {

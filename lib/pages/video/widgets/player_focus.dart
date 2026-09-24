@@ -74,14 +74,14 @@ class PlayerFocus extends StatelessWidget {
       if (hasPlayer) {
         _setVolume(isIncrease: isIncrease);
         plPlayerController
-          ..longPressTimer?.cancel()
-          ..longPressTimer = Timer.periodic(
+          ..cancelVolumeKeyRepeatTimer()
+          ..volumeKeyRepeatTimer = Timer.periodic(
             const Duration(milliseconds: 150),
             (_) => _setVolume(isIncrease: isIncrease),
           );
       }
     } else if (event is KeyUpEvent) {
-      plPlayerController.cancelLongPressTimer();
+      plPlayerController.cancelVolumeKeyRepeatTimer();
     }
   }
 
@@ -123,7 +123,7 @@ class PlayerFocus extends StatelessWidget {
         if (event is KeyDownEvent) {
           if (hasPlayer && !plPlayerController.longPressStatus.value) {
             plPlayerController
-              ..longPressTimer?.cancel()
+              ..cancelLongPressTimer()
               ..longPressTimer = Timer(
                 const Duration(milliseconds: 200),
                 () => plPlayerController

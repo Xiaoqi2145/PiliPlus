@@ -392,6 +392,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     removeObserverMobile(this);
     _danmakuListener?.cancel();
     _tapGestureRecognizer.dispose();
+    // LongPressGestureRecognizer.resolve(rejected) 在长按已被接受时只做
+    // _reset()，不会回调 onLongPressCancel，因此仅靠 dispose 无法结束会话。
+    // 进入小窗时播放器仍在播放，必须显式还原倍速。
+    unawaited(plPlayerController.setLongPressStatus(false));
     _longPressRecognizer?.dispose();
     _doubleTapGestureRecognizer.dispose();
     _scaleGestureRecognizer.dispose();
@@ -1461,13 +1465,14 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                         color: Color(0x88000000),
                         borderRadius: BorderRadius.all(Radius.circular(16)),
                       ),
-                      child: Obx(
-                        () => Text(
-                          '${plPlayerController.enableAutoLongPressSpeed ? (plPlayerController.longPressStatus.value ? plPlayerController.lastPlaybackSpeed : plPlayerController.playbackSpeed) * 2 : plPlayerController.longPressSpeed}倍速中',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 13,
-                          ),
+                      // 与真正下发的倍速同源，避免规则变动后两处不一致。
+                      // 会话期间 longPressSpeed 返回本次锁定的目标值，因此
+                      // 由外层 Obx（观察 longPressStatus）驱动即可。
+                      child: Text(
+                        '${plPlayerController.longPressSpeed}倍速中',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
                         ),
                       ),
                     ),
