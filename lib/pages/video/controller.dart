@@ -799,7 +799,10 @@ class VideoDetailController extends GetxController
     playerInit();
   }
 
-  Future<void>? _initPlayerIfNeeded(bool autoFullScreenFlag) {
+  Future<void>? _initPlayerIfNeeded(
+    bool autoFullScreenFlag, [
+    int? generation,
+  ]) {
     if (isRestoringFromPip ||
         _autoPlay.value ||
         (plPlayerController.preInitPlayer && !plPlayerController.processing) &&
@@ -808,21 +811,29 @@ class VideoDetailController extends GetxController
                 : videoPlayerKey.currentState?.mounted == true)) {
       return playerInit(
         autoFullScreenFlag: autoFullScreenFlag && _autoPlay.value,
+        generation: generation,
       );
     }
+    // 本次不会初始化播放器：恢复守卫若留下，会污染下一次主动 playerInit
+    isRestoringFromPip = false;
     return null;
   }
 
   Future<void> playerInit({
     bool? autoplay,
     bool autoFullScreenFlag = false,
+    int? generation,
   }) async {
     // 从应用内小窗恢复时播放器实例与数据源都仍然有效，再次
     // setDataSource 会重新 open 媒体（黑帧 + 回到起点）。这里只跳过媒体
     // 重建，后面的跳过片段/字幕/弹幕等元数据初始化仍然照常执行。
-    // 守卫只消费一次：后续换清晰度/分P 等主动重建仍走正常初始化。
-    if (isRestoringFromPip) {
-      isRestoringFromPip = false;
+    // 读取即消费：标志必须在进入本函数时就清掉，否则一旦本次没有
+    // 真正接管播放器（例如 _initPlayerIfNeeded 直接返回 null），
+    // 标志会滞留到下一次主动 playerInit，被误判成"复用现有媒体"而
+    // 跳过 setDataSource → 黑屏。
+    final restoring = isRestoringFromPip;
+    isRestoringFromPip = false;
+    if (restoring) {
       videoState.value = true;
       setSubtitle(vttSubtitlesIndex.value);
       // 恢复不重新定位，残留的 defaultST 会污染后续换清晰度/分P
@@ -873,6 +884,11 @@ class VideoDetailController extends GetxController
       if (plPlayerController.enableBlock) {
         initSkip();
       }
+
+      // setDataSource 是一次长 await，期间用户可能已经切到别的分P/视频。
+      // 此时 cid 等字段已被改写，若继续跑元数据请求，会用新 cid 去拉
+      // 旧媒体源的字幕/看点，随后补跑再拉一遍。带 generation 时先校验。
+      if (generation != null && generation != _queryGeneration) return;
 
       if (vttSubtitlesIndex.value == -1) {
         _queryPlayInfo();
@@ -1096,7 +1112,7 @@ class VideoDetailController extends GetxController
           _setVideoHeight();
           currentDecodeFormats = VideoDecodeFormatType.AVC;
           currentVideoQa.value = videoQuality;
-          await _initPlayerIfNeeded(autoFullScreenFlag);
+          await _initPlayerIfNeeded(autoFullScreenFlag, generation);
           return;
         } else {
           videoPlayerServiceHandler?.endTransition(playing: false);
@@ -1170,7 +1186,7 @@ class VideoDetailController extends GetxController
       } else {
         audioUrl = '';
       }
-      await _initPlayerIfNeeded(autoFullScreenFlag);
+      await _initPlayerIfNeeded(autoFullScreenFlag, generation);
     } else {
       videoPlayerServiceHandler?.endTransition(playing: false);
       if (isRestoringFromPip) {
@@ -1469,6 +1485,16 @@ class VideoDetailController extends GetxController
     videoUrl = null;
     audioUrl = null;
 
+    // 画质/音质属于"上一个视频"的状态：切集窗口内若不清除，画质按钮会
+    // 显示旧视频的画质，且 updatePlayer 的 currentVideoQa==null 守卫会
+    // 失效（此时 data 也还是旧的）。置空后 UI 与 updatePlayer 都能正确
+    // 感知"新视频数据未就绪"。
+    // 注意：firstVideo 不在此清除 —— 它只在紧随赋值之后被 _setVideoHeight
+    // 读取（363/1108/1163），不存在陈旧读取窗口；置空反而会让
+    // header_control:1089 等 5 处调用点被迫加空判。
+    currentVideoQa.value = null;
+    currentAudioQa = null;
+
     // danmaku
     savedDanmaku = null;
 
@@ -1493,8 +1519,11 @@ class VideoDetailController extends GetxController
       }
 
       // sponsor block
-      // 小窗恢复时不重置，保留无缝恢复能力
-      if (!PipOverlayService.isInPipMode && blockConfig.enableBlock) {
+      // 仅"小窗恢复"这一条路径需要保留片段（播放器与媒体都在续用）。
+      // 其余情况（含小窗播放中在后台连播到下一集）都必须清理，
+      // 否则上一集的跳过片段会污染新视频。
+      // 此前用 isInPipMode 判断过宽：只要在小窗里切集就不清理了。
+      if (blockConfig.enableBlock && !isRestoringFromPip) {
         resetBlock();
       }
 
