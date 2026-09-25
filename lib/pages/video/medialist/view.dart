@@ -12,6 +12,7 @@ import 'package:PiliPlus/models_new/video/video_detail/episode.dart';
 import 'package:PiliPlus/pages/common/slide/common_slide_page.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
+import 'package:easy_debounce/easy_throttle.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
@@ -122,35 +123,58 @@ class _MediaListPanelState extends State<MediaListPanel>
         : _buildList(theme);
   }
 
+  /// 距底部不足该阈值时预取下一页。
+  static const double _loadMoreThreshold = 400;
+
+  void _loadMore() {
+    final count = widget.count;
+    if (count != null && widget.mediaList.length >= count) return;
+    widget.loadMoreMedia();
+  }
+
+  bool _onScroll(ScrollNotification notification) {
+    if (notification.metrics.extentAfter < _loadMoreThreshold) {
+      // 节流兜底：滚动通知很密集，避免在闩锁之外再堆积请求。
+      // controller 侧的 _isLoadingMediaList 是主守卫，这里是次级的。
+      EasyThrottle.throttle(
+        'mediaListLoadMore',
+        const Duration(seconds: 1),
+        _loadMore,
+      );
+    }
+    return false;
+  }
+
   Widget _buildList(ThemeData theme) {
     final showDelBtn = widget.onDelete != null && widget.mediaList.length > 1;
-    return CustomScrollView(
-      controller: _controller,
-      physics: const AlwaysScrollableScrollPhysics(),
-      slivers: [
-        SliverPadding(
-          padding: EdgeInsets.only(
-            top: 7,
-            bottom: MediaQuery.viewPaddingOf(context).bottom + 100,
-          ),
-          sliver: Obx(
-            () => SliverFixedExtentList.builder(
-              itemExtent: 112,
-              itemCount: widget.mediaList.length,
-              itemBuilder: (context, index) {
-                if (index == widget.mediaList.length - 1 &&
-                    (widget.count == null ||
-                        widget.mediaList.length < widget.count!)) {
-                  widget.loadMoreMedia();
-                }
-                final item = widget.mediaList[index];
-                final isCurr = item.bvid == widget.bvid;
-                return _buildItem(theme, index, item, isCurr, showDelBtn);
-              },
+    // 加载触发放在滚动通知里，而不是 itemBuilder：
+    // itemBuilder 会在构建/布局期间被反复调用，在那里发网络请求
+    // 会产生大量重复请求（count 为空的列表源尤其明显）。
+    return NotificationListener<ScrollNotification>(
+      onNotification: _onScroll,
+      child: CustomScrollView(
+        controller: _controller,
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverPadding(
+            padding: EdgeInsets.only(
+              top: 7,
+              bottom: MediaQuery.viewPaddingOf(context).bottom + 100,
+            ),
+            sliver: Obx(
+              () => SliverFixedExtentList.builder(
+                itemExtent: 112,
+                itemCount: widget.mediaList.length,
+                itemBuilder: (context, index) {
+                  final item = widget.mediaList[index];
+                  final isCurr = item.bvid == widget.bvid;
+                  return _buildItem(theme, index, item, isCurr, showDelBtn);
+                },
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

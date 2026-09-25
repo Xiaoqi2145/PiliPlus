@@ -446,6 +446,34 @@ class VideoDetailController extends GetxController
     );
   }
 
+  /// 分页 in-flight 闩锁：面板在构建/滚动时会多次触发加载，
+  /// 没有它会出现同 oid 的并发请求，各自 append 同一页 → 列表出现重复项。
+  bool _isLoadingMediaList = false;
+
+  /// 往后翻页已到底（服务端返回空页）。避免每次滚到底都重发请求。
+  bool _mediaListEnded = false;
+  bool get mediaListEnded => _mediaListEnded;
+
+  /// 按 aid 去重后追加到末尾
+  void _appendMediaList(List<MediaListItemModel> items) {
+    final seen = mediaList.map((e) => e.aid).toSet();
+    mediaList.addAll(items.where((e) => seen.add(e.aid)));
+  }
+
+  /// 按 aid 去重后插入到头部（向前翻页）
+  void _insertMediaList(int index, List<MediaListItemModel> items) {
+    final seen = mediaList.map((e) => e.aid).toSet();
+    mediaList.insertAll(index, items.where((e) => seen.add(e.aid)));
+  }
+
+  /// 整表替换（倒序重建），并按 aid 去重
+  void _replaceMediaList(List<MediaListItemModel> items) {
+    final seen = <int?>{};
+    mediaList.value = items.where((e) => seen.add(e.aid)).toList();
+    // 列表被整表替换，之前的"已到底"判断失效
+    _mediaListEnded = false;
+  }
+
   Future<void> getMediaList({
     bool isReverse = false,
     bool isLoadPrevious = false,
@@ -454,6 +482,13 @@ class VideoDetailController extends GetxController
     if (!isReverse && count != null && mediaList.length >= count) {
       return;
     }
+    if (!isReverse && !isLoadPrevious && _mediaListEnded) {
+      return;
+    }
+    if (_isLoadingMediaList) {
+      return;
+    }
+    _isLoadingMediaList = true;
     final res = await UserHttp.getMediaList(
       type: args['mediaType'] ?? sourceType.mediaType,
       bizId: args['mediaId'] ?? -1,
@@ -481,28 +516,29 @@ class VideoDetailController extends GetxController
           ? true
           : false,
     );
-    if (res case Success(:final response)) {
-      if (response.mediaList.isNotEmpty) {
-        if (isReverse) {
-          mediaList.value = response.mediaList;
-          for (final item in mediaList) {
-            if (item.cid != null) {
-              try {
-                Get.find<UgcIntroController>(
-                  tag: heroTag,
-                ).onChangeEpisode(item);
-              } catch (_) {}
-              break;
-            }
+    try {
+      if (res case Success(:final response)) {
+        if (response.mediaList.isEmpty && !isReverse && !isLoadPrevious) {
+          // 服务端已无更多项，标记到底，避免重复触发
+          _mediaListEnded = true;
+        } else if (response.mediaList.isNotEmpty) {
+          if (isReverse) {
+            // 只重建列表顺序，不改变当前播放目标：
+            // 倒序是列表排序操作，与"正在播哪个视频"无关。
+            // 此前这里会调 onChangeEpisode 切到新顺序的首个视频，
+            // 导致点一下"顺序/倒序"就把播放切走。
+            _replaceMediaList(response.mediaList);
+          } else if (isLoadPrevious) {
+            _insertMediaList(0, response.mediaList);
+          } else {
+            _appendMediaList(response.mediaList);
           }
-        } else if (isLoadPrevious) {
-          mediaList.insertAll(0, response.mediaList);
-        } else {
-          mediaList.addAll(response.mediaList);
         }
+      } else {
+        res.toast();
       }
-    } else {
-      res.toast();
+    } finally {
+      _isLoadingMediaList = false;
     }
   }
 
