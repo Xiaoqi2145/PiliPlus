@@ -139,7 +139,7 @@ class LocalIntroController extends CommonIntroController {
       ..bvid = entry.bvid
       ..cid.value = entry.cid
       ..args['dirPath'] = entry.entryDirPath
-      ..initFileSource(entry, isInit: false)
+      ..initFileSource(entry)
       ..playerInit();
     videoDetail
       ..value.title = entry.showTitle

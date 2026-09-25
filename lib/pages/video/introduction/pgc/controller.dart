@@ -253,6 +253,14 @@ class PgcIntroController extends CommonIntroController {
 
   // 修改分P或番剧分集
   Future<bool> onChangeEpisode(BaseEpisodeItem episode) async {
+    // 失败时回滚：下方改写 epId/bvid/aid/cid 后若抛异常，
+    // 会留下"播放器停了但页面指向新剧集"的不一致状态。
+    final prevEpId = epId;
+    final prevBvid = bvid;
+    final prevVideoCtrEpId = videoDetailCtr.epId;
+    final prevVideoCtrBvid = videoDetailCtr.bvid;
+    final prevVideoCtrAid = videoDetailCtr.aid;
+    final prevVideoCtrCid = videoDetailCtr.cid.value;
     try {
       final int epId = episode.epId ?? episode.id!;
       final String bvid = episode.bvid ?? this.bvid;
@@ -303,6 +311,14 @@ class PgcIntroController extends CommonIntroController {
       queryVideoIntro(episode as EpisodeItem);
       return true;
     } catch (e) {
+      this
+        ..epId = prevEpId
+        ..bvid = prevBvid;
+      videoDetailCtr
+        ..epId = prevVideoCtrEpId
+        ..bvid = prevVideoCtrBvid
+        ..aid = prevVideoCtrAid
+        ..cid.value = prevVideoCtrCid;
       videoPlayerServiceHandler?.endTransition(playing: false);
       if (kDebugMode) debugPrint('pgc onChangeEpisode: $e');
       return false;

@@ -463,6 +463,11 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
     BaseEpisodeItem episode, {
     bool isStein = false,
   }) async {
+    // 失败时回滚：下方断点前 bvid/aid/cid 可能已被改写，
+    // 抛异常会留下"播放器停了但页面指向新视频"的不一致状态。
+    final prevBvid = videoDetailCtr.bvid;
+    final prevAid = videoDetailCtr.aid;
+    final prevCid = videoDetailCtr.cid.value;
     try {
       final String bvid = episode.bvid ?? this.bvid;
       final int aid = episode.aid ?? IdUtils.bv2av(bvid);
@@ -558,6 +563,10 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       queryOnlineTotal();
       return true;
     } catch (e) {
+      videoDetailCtr
+        ..bvid = prevBvid
+        ..aid = prevAid
+        ..cid.value = prevCid;
       videoPlayerServiceHandler?.endTransition(playing: false);
       if (kDebugMode) debugPrint('ugc onChangeEpisode: $e');
       return false;
@@ -682,7 +691,8 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
 
       if (!isPart &&
           videoDetailCtr.isPlayAll &&
-          currentIndex == episodes.length - 2) {
+          currentIndex == episodes.length - 2 &&
+          !videoDetailCtr.mediaListEnded) {
         videoDetailCtr.getMediaList();
       }
 

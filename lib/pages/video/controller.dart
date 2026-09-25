@@ -341,7 +341,7 @@ class VideoDetailController extends GetxController
     }
   }
 
-  void initFileSource(BiliDownloadEntryInfo entry, {bool isInit = true}) {
+  void initFileSource(BiliDownloadEntryInfo entry) {
     this.entry = entry;
     firstVideo = VideoItem(
       id: entry.preferedVideoQuality,
@@ -566,13 +566,15 @@ class VideoDetailController extends GetxController
         onDelete:
             sourceType == SourceType.watchLater ||
                 (sourceType == SourceType.fav && args['isOwner'] == true)
-            ? (item, index) async {
+            ? (item) async {
                 if (sourceType == SourceType.watchLater) {
                   final res = await UserHttp.toViewDel(
                     aids: item.aid.toString(),
                   );
                   if (res.isSuccess) {
-                    mediaList.removeAt(index);
+                    // 按 aid 删除：index 是面板构建时捕获的，其间列表可能
+                    // 被倒序整表替换或追加分页，用 index 会删错项。
+                    mediaList.removeWhere((e) => e.aid == item.aid);
                   }
                 } else {
                   final res = await FavHttp.favVideo(
@@ -580,7 +582,7 @@ class VideoDetailController extends GetxController
                     delIds: '${args['mediaId']}',
                   );
                   if (res.isSuccess) {
-                    mediaList.removeAt(index);
+                    mediaList.removeWhere((e) => e.aid == item.aid);
                     SmartDialog.showToast('取消收藏');
                   } else {
                     res.toast();

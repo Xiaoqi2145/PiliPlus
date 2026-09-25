@@ -42,7 +42,7 @@ class MediaListPanel extends CommonSlidePage {
   final bool desc;
   final VoidCallback onReverse;
   final RefreshCallback? loadPrevious;
-  final void Function(MediaListItemModel item, int index)? onDelete;
+  final void Function(MediaListItemModel item)? onDelete;
 
   @override
   State<MediaListPanel> createState() => _MediaListPanelState();
@@ -317,9 +317,9 @@ class _MediaListPanelState extends State<MediaListPanel>
                       onTap: () => showConfirmDialog(
                         context: context,
                         title: const Text('确定移除该视频？'),
-                        onConfirm: () => widget.onDelete!(item, index),
+                        onConfirm: () => widget.onDelete!(item),
                       ),
-                      onLongPress: () => widget.onDelete!(item, index),
+                      onLongPress: () => widget.onDelete!(item),
                       child: Padding(
                         padding: const EdgeInsets.all(9),
                         child: Icon(
