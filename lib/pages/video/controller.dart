@@ -772,7 +772,13 @@ class VideoDetailController extends GetxController
   void updatePlayer() {
     final currentVideoQa = this.currentVideoQa.value;
     if (currentVideoQa == null) return;
-    _autoPlay.value = true;
+    // 切集/重载的元数据在途时，data 仍是上一个视频的，
+    // 此时组 URL 会开错媒体源，并与随后的补跑重复 setDataSource
+    if (isQuerying) return;
+    // 不再无条件把 autoPlay 置真：那是"是否自动播放"的用户意图，
+    // 被改画质顺手改写后，暂停中改画质会变成自动续播，且该值不会恢复。
+    // 是否续播交给播放器的 _playIntent（setDataSource 后由
+    // _initializePlayer 判定），保持用户当前的播放/暂停状态。
     playedTime = plPlayerController.videoPlayerController?.state.position;
     plPlayerController
       ..isBuffering.value = false
@@ -883,6 +889,9 @@ class VideoDetailController extends GetxController
   bool isQuerying = false;
   int _queryGeneration = 0;
   bool _queryPending = false;
+  /// 补跑时使用的最新一次请求的参数（见 queryVideoUrl 的并发分支）
+  bool _pendingFromReset = false;
+  bool _pendingAutoFullScreenFlag = false;
 
   final languages = Rxn<List<LanguageItem>>();
   final currLang = Rxn<String>();
@@ -968,6 +977,11 @@ class VideoDetailController extends GetxController
       // 否则之后主动换清晰度时会被误判成"复用现有媒体"而跳过重建
       isRestoringFromPip = false;
       _queryPending = true;
+      // 记录本次（最新一次）请求的参数：补跑时必须用最后请求的意愿，
+      // 否则"重载视频"/"CDN 切换"（fromReset: true）撞上在途查询时
+      // 会被降级成普通查询，续播位置被服务端历史进度覆盖。
+      _pendingFromReset = fromReset;
+      _pendingAutoFullScreenFlag = autoFullScreenFlag;
       return;
     }
     isQuerying = true;
@@ -977,10 +991,12 @@ class VideoDetailController extends GetxController
       isQuerying = false;
       if (_queryPending && !isClosed) {
         _queryPending = false;
+        final pendingFromReset = _pendingFromReset;
+        final pendingAutoFullScreenFlag = _pendingAutoFullScreenFlag;
         unawaited(
           queryVideoUrl(
-            fromReset: fromReset,
-            autoFullScreenFlag: autoFullScreenFlag,
+            fromReset: pendingFromReset,
+            autoFullScreenFlag: pendingAutoFullScreenFlag,
           ),
         );
       }
