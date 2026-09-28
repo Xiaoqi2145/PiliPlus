@@ -171,6 +171,11 @@ class AccountManager extends Interceptor {
       'hdslb.com',
       'biliimg.com',
       'site/getCoin',
+      // 播放地址接口：UGC/PGC/PUGV/TV 四种 playurl 均含此段。
+      // 该接口是 GET, 一次失败会经 RetryInterceptor(2 次) 与上层
+      // _getVideoUrlWithRetry(5 次) 叠加, 最坏弹出约 15 条含完整 URL 的 toast;
+      // 且失败状态用户已能从播放器 UI 感知, 无需重复提示。
+      'playurl',
     ];
     String url = err.requestOptions.uri.toString();
     if (kDebugMode) debugPrint('🌹🌹ApiInterceptor: $url\n$err');

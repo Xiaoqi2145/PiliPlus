@@ -486,7 +486,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         introController.startTimer();
         ctr.showDanmaku = true;
       }
-    } else if (state == .paused) {
+    } else if (state == .paused || state == .detached) {
+      // paused 已覆盖常规后台路径; detached 是防御性补充,
+      // 确保页面被系统回收前一定停掉在线人数轮询
       introController.cancelTimer();
       ctr.showDanmaku = false;
     }

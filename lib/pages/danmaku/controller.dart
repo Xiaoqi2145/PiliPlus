@@ -29,10 +29,18 @@ class PlDanmakuController {
   final Map<int, List<DanmakuElem>> _dmSegMap = HashMap();
   // 已请求的段落标记
   late final Set<int> _requestedSeg = HashSet();
+  // 失败退避：段落 → 连续失败次数 / 最早允许重试时刻。
+  // 不加退避时，弱网下每个位置 tick(100ms) 都会重发失败的段落请求。
+  final Map<int, int> _failCount = HashMap();
+  final Map<int, DateTime> _retryAfter = HashMap();
+
+  static const _kMaxBackoff = Duration(seconds: 32);
 
   void dispose() {
     _dmSegMap.clear();
     _requestedSeg.clear();
+    _failCount.clear();
+    _retryAfter.clear();
   }
 
   Future<void> queryDanmaku(int segmentIndex) async {
@@ -42,6 +50,11 @@ class PlDanmakuController {
     if (_requestedSeg.contains(segmentIndex)) {
       return;
     }
+    // 退避窗口内跳过：位置推进到该段末尾时自然还会再试
+    if (_retryAfter[segmentIndex] case final retryAt?
+        when DateTime.now().isBefore(retryAt)) {
+      return;
+    }
     _requestedSeg.add(segmentIndex);
     final res = await DmGrpc.dmSegMobile(
       cid: _cid,
@@ -49,11 +62,20 @@ class PlDanmakuController {
     );
 
     if (res case Success(:final response)) {
+      _failCount.remove(segmentIndex);
+      _retryAfter.remove(segmentIndex);
       if (response.state == 1) {
         _plPlayerController.dmState.add(_cid);
       }
       handleDanmaku(response.elems);
     } else {
+      final failures = (_failCount[segmentIndex] ?? 0) + 1;
+      _failCount[segmentIndex] = failures;
+      // 1,2,4,8,16,32 秒指数退避
+      final backoff = Duration(seconds: 1 << (failures - 1).clamp(0, 5));
+      _retryAfter[segmentIndex] = DateTime.now().add(
+        backoff > _kMaxBackoff ? _kMaxBackoff : backoff,
+      );
       _requestedSeg.remove(segmentIndex);
     }
   }
