@@ -167,23 +167,46 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   /// Keep the notification/foreground service active while the next media
   /// item is being resolved. This is intentionally separate from user pause.
+  ///
+  /// 过渡期上限是**兜底**而非预期路径：正常恢复会在每次重试时调用
+  /// [extendTransition] 续命，只有彻底失去恢复意图时才会真正到点。
+  /// 取值需覆盖最坏恢复窗口（playurl 退避重试约 7.5s + 媒体源重开 4 轮约 7.5s），
+  /// 并留出余量。
+  static const _kTransitionTimeout = Duration(seconds: 45);
+
   void beginTransition() {
     if (!enableBackgroundPlay || _item.isEmpty) return;
     _pauseTimer?.cancel();
     _isTransitioning = true;
-    final generation = ++_transitionGeneration;
-    _transitionTimer?.cancel();
-    _transitionTimer = Timer(const Duration(seconds: 30), () {
-      if (generation == _transitionGeneration) {
-        endTransition(playing: false);
-      }
-    });
+    _transitionGeneration++;
+    _armTransitionTimer(_transitionGeneration);
     playbackState.add(
       playbackState.value.copyWith(
         processingState: AudioProcessingState.buffering,
         playing: true,
       ),
     );
+  }
+
+  void _armTransitionTimer(int generation) {
+    _transitionTimer?.cancel();
+    _transitionTimer = Timer(_kTransitionTimeout, () {
+      if (generation == _transitionGeneration && _isTransitioning) {
+        endTransition(playing: false);
+      }
+    });
+  }
+
+  /// 重试 / 重取播放地址期间续命，避免把"正在恢复"误判成"已失败"。
+  ///
+  /// 若不加此机制，弱网下自动连播的地址请求超过上限就会走到
+  /// [endTransition](playing: false)，进而退出前台服务并释放
+  /// audio_service 的 PARTIAL_WAKE_LOCK，使后台恢复彻底失去保障。
+  ///
+  /// 仅在过渡态生效；非过渡期调用是 no-op。
+  void extendTransition() {
+    if (!_isTransitioning || !enableBackgroundPlay) return;
+    _armTransitionTimer(_transitionGeneration);
   }
 
   void endTransition({required bool playing}) {

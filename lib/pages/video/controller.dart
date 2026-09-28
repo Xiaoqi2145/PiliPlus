@@ -947,6 +947,9 @@ class VideoDetailController extends GetxController
         Duration(seconds: 4),
       ]) {
         await Future<void>.delayed(delay);
+        // 重试期间为过渡态续命：否则弱网下自动连播的地址请求会撞上
+        // audio_handler 的过渡期上限，被判为失败并退出前台服务
+        videoPlayerServiceHandler?.extendTransition();
         result = await _getVideoUrl(quality);
         if (result is Success) break;
       }

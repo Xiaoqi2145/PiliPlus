@@ -303,6 +303,8 @@ class AudioController extends GetxController
       ]) {
         await Future<void>.delayed(delay);
         if (generation != _playGeneration) return false;
+        // 与视频侧一致：重试期间为过渡态续命，避免被过渡期上限判为失败
+        videoPlayerServiceHandler?.extendTransition();
         res = await AudioGrpc.audioPlayUrl(
           itemType: itemType,
           oid: oid,
