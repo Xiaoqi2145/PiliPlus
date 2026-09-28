@@ -174,6 +174,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _autoPlay = false;
   bool _playIntent = false;
 
+  /// 媒体源多次重开都失败时的兜底回调：由页面层重新获取播放地址并重建媒体源。
+  ///
+  /// 必要性：bilibili 的 CDN 地址带时效参数（deadline），过期后无论重开多少次
+  /// 都是 403/410，[refreshPlayer] 重放同一个地址无法恢复。音频页在
+  /// `pages/audio/controller.dart` 的 _recoverStreamAfterError 中会重新取地址，
+  /// 视频侧原先缺失等价逻辑。
+  ///
+  /// 返回 true 表示已接管恢复，调用方不再结束过渡态。
+  Future<bool> Function()? onMediaSourceExpired;
+
   // 记录历史记录
   int? _aid;
   String? _bvid;
@@ -1173,6 +1183,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _streamRecoveryInProgress = true;
     final generation = ++_streamRecoveryGeneration;
     videoPlayerServiceHandler?.beginTransition();
+    var recovered = false;
     try {
       const delays = <Duration>[
         Duration(milliseconds: 500),
@@ -1183,16 +1194,32 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       for (final delay in delays) {
         await Future<void>.delayed(delay);
         if (generation != _streamRecoveryGeneration || !_playIntent) return;
-        if (player.state.playing) return;
+        if (player.state.playing) {
+          recovered = true;
+          return;
+        }
+        // 每次重试都为过渡态续命，避免恢复过程被过渡期上限判死
+        videoPlayerServiceHandler?.extendTransition();
         try {
           await refreshPlayer();
-          if (player.state.playing) return;
+          if (player.state.playing) {
+            recovered = true;
+            return;
+          }
         } catch (_) {}
+      }
+      // 反复重开同一地址仍失败：多半是 CDN 地址已过期，交给页面层重取
+      if (generation == _streamRecoveryGeneration && _playIntent) {
+        recovered = await onMediaSourceExpired?.call() ?? false;
       }
     } finally {
       if (generation == _streamRecoveryGeneration) {
         _streamRecoveryInProgress = false;
-        videoPlayerServiceHandler?.endTransition(playing: false);
+        // 已由页面层接管恢复时不结束过渡态：重建成功后 stream.playing
+        // 监听会调用 endTransition(playing: true)
+        if (!recovered) {
+          videoPlayerServiceHandler?.endTransition(playing: false);
+        }
       }
     }
   }
@@ -2011,6 +2038,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _stopOrientationListener();
     _disableAutoEnterPip();
     setPlayCallBack(null);
+    // 与 setPlayCallBack 并列：播放器真正被拆毁时才清回调，
+    // 避免持有已关闭的页面 controller（上面 _playerCount > 1 的提前返回
+    // 意味着其它页面仍在复用本实例，此时不能清）
+    onMediaSourceExpired = null;
     dmState.clear();
     if (showSeekPreview) {
       _clearPreview();

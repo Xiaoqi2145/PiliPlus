@@ -821,11 +821,33 @@ class VideoDetailController extends GetxController
     return null;
   }
 
+  /// CDN 地址过期后的兜底：重新获取播放地址并重建媒体源。
+  ///
+  /// 仅在"当前播放器确实在播本 controller 的视频"时才接管——播放器是跨页面
+  /// 共享实例，小窗与隐藏页面可能同时持有引用，不加守卫会由错误的页面接管恢复。
+  ///
+  /// 返回 true 表示已接管过渡态：await 之后由下游收尾——成功时
+  /// `stream.playing` 监听调用 `endTransition(playing: true)`，失败时
+  /// `_queryVideoUrl` 自己调用 `endTransition(playing: false)`。
+  /// 只有守卫未通过（无人接管）时才返回 false，让调用方结束过渡态。
+  Future<bool> _recoverExpiredMediaSource() async {
+    if (isClosed || isFileSource) return false;
+    if (plPlayerController.cid != cid.value) return false;
+    if (videoUrl == null) return false;
+    if (kDebugMode) {
+      debugPrint('media source expired, re-query playurl: $bvid/${cid.value}');
+    }
+    // fromReset: true —— 不采用服务端 last_play_time，避免续播位置被历史进度覆盖
+    await queryVideoUrl(fromReset: true);
+    return true;
+  }
+
   Future<void> playerInit({
     bool? autoplay,
     bool autoFullScreenFlag = false,
     int? generation,
   }) async {
+    plPlayerController.onMediaSourceExpired = _recoverExpiredMediaSource;
     // 从应用内小窗恢复时播放器实例与数据源都仍然有效，再次
     // setDataSource 会重新 open 媒体（黑帧 + 回到起点）。这里只跳过媒体
     // 重建，后面的跳过片段/字幕/弹幕等元数据初始化仍然照常执行。
@@ -1461,9 +1483,11 @@ class VideoDetailController extends GetxController
   @override
   void onClose() {
     if (isEnteringPip) {
-      // 正在进入小窗，保留资源
+      // 正在进入小窗，保留资源：controller 仍持有该视频，
+      // 回调必须一并保留，否则小窗期间地址过期无人接管。
       return;
     }
+    plPlayerController.onMediaSourceExpired = null;
     cid.close();
     if (isFileSource) {
       cacheLocalProgress();
