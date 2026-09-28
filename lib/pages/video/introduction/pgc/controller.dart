@@ -284,8 +284,19 @@ class PgcIntroController extends CommonIntroController {
         ..epId = epId
         ..bvid = bvid
         ..aid = aid
-        ..cid.value = cid
-        ..queryVideoUrl();
+        ..cid.value = cid;
+
+      // 与 UGC 侧一致：地址获取失败时回滚，避免"播放器停了但页面指向新剧集"
+      if (!await videoDetailCtr.queryVideoUrl()) {
+        this.epId = prevEpId;
+        this.bvid = prevBvid;
+        videoDetailCtr
+          ..epId = prevVideoCtrEpId
+          ..bvid = prevVideoCtrBvid
+          ..aid = prevVideoCtrAid
+          ..cid.value = prevVideoCtrCid;
+        return false;
+      }
       if (cover != null && cover.isNotEmpty) {
         videoDetailCtr.cover.value = cover;
       }

@@ -826,10 +826,9 @@ class VideoDetailController extends GetxController
   /// 仅在"当前播放器确实在播本 controller 的视频"时才接管——播放器是跨页面
   /// 共享实例，小窗与隐藏页面可能同时持有引用，不加守卫会由错误的页面接管恢复。
   ///
-  /// 返回 true 表示已接管过渡态：await 之后由下游收尾——成功时
-  /// `stream.playing` 监听调用 `endTransition(playing: true)`，失败时
-  /// `_queryVideoUrl` 自己调用 `endTransition(playing: false)`。
-  /// 只有守卫未通过（无人接管）时才返回 false，让调用方结束过渡态。
+  /// 返回值透传 [queryVideoUrl]：true 表示已接管（成功时由 `stream.playing`
+  /// 监听收尾为 `endTransition(playing: true)`），false 表示失败且已由
+  /// `_queryVideoUrl` 结束过渡态。
   Future<bool> _recoverExpiredMediaSource() async {
     if (isClosed || isFileSource) return false;
     if (plPlayerController.cid != cid.value) return false;
@@ -838,8 +837,7 @@ class VideoDetailController extends GetxController
       debugPrint('media source expired, re-query playurl: $bvid/${cid.value}');
     }
     // fromReset: true —— 不采用服务端 last_play_time，避免续播位置被历史进度覆盖
-    await queryVideoUrl(fromReset: true);
-    return true;
+    return queryVideoUrl(fromReset: true);
   }
 
   Future<void> playerInit({
@@ -1007,13 +1005,17 @@ class VideoDetailController extends GetxController
 
   // 视频链接
   /// TODO: merge [DownloadHttp.getVideoUrl].
-  Future<void> queryVideoUrl({
+  ///
+  /// 返回 true 表示本次调用后播放链路处于"已就绪或已被接管"的状态；
+  /// 返回 false 表示明确失败，调用方可据此回滚页面状态。
+  Future<bool> queryVideoUrl({
     bool fromReset = false,
     bool autoFullScreenFlag = false,
   }) async {
     final generation = ++_queryGeneration;
     if (isFileSource) {
-      return _initPlayerIfNeeded(autoFullScreenFlag);
+      await _initPlayerIfNeeded(autoFullScreenFlag);
+      return true;
     }
     if (isQuerying) {
       // 并发请求会让本次初始化直接返回，恢复守卫不能一直挂着，
@@ -1025,11 +1027,13 @@ class VideoDetailController extends GetxController
       // 会被降级成普通查询，续播位置被服务端历史进度覆盖。
       _pendingFromReset = fromReset;
       _pendingAutoFullScreenFlag = autoFullScreenFlag;
-      return;
+      // 已登记补跑，本次不算失败：若返回 false 会让调用方回滚 bvid/cid，
+      // 与即将使用新参数执行的补跑产生冲突
+      return true;
     }
     isQuerying = true;
     try {
-      await _queryVideoUrl(fromReset, autoFullScreenFlag, generation);
+      return await _queryVideoUrl(fromReset, autoFullScreenFlag, generation);
     } finally {
       isQuerying = false;
       if (_queryPending && !isClosed) {
@@ -1047,7 +1051,7 @@ class VideoDetailController extends GetxController
   }
 
   @pragma('vm:prefer-inline')
-  Future<void> _queryVideoUrl(
+  Future<bool> _queryVideoUrl(
     bool fromReset,
     bool autoFullScreenFlag,
     int generation,
@@ -1069,7 +1073,10 @@ class VideoDetailController extends GetxController
 
     final result = await _getVideoUrlWithRetry(VideoQuality.hdrVivid.code);
 
-    if (generation != _queryGeneration) return;
+    if (generation != _queryGeneration) {
+      // 已被更新的请求取代：不是失败，后续请求负责收尾
+      return true;
+    }
 
     if (result case Success(:final response)) {
       data = response;
@@ -1140,21 +1147,21 @@ class VideoDetailController extends GetxController
           currentDecodeFormats = VideoDecodeFormatType.AVC;
           currentVideoQa.value = videoQuality;
           await _initPlayerIfNeeded(autoFullScreenFlag, generation);
-          return;
+          return true;
         } else {
           videoPlayerServiceHandler?.endTransition(playing: false);
           SmartDialog.showToast('视频资源不存在');
           if (isRestoringFromPip) {
             // 播放器仍持有有效数据源，只是元数据刷新失败，保留播放状态
             isRestoringFromPip = false;
-            return;
+            return true;
           }
           _autoPlay.value = false;
           videoState.value = false;
           if (plPlayerController.isFullScreen.value) {
             plPlayerController.triggerFullScreen(status: false);
           }
-          return;
+          return false;
         }
       }
 
@@ -1214,13 +1221,14 @@ class VideoDetailController extends GetxController
         audioUrl = '';
       }
       await _initPlayerIfNeeded(autoFullScreenFlag, generation);
+      return true;
     } else {
       videoPlayerServiceHandler?.endTransition(playing: false);
       if (isRestoringFromPip) {
         // 播放器仍在正常播放，只是元数据刷新失败；不能因此把已有的
         // 播放器区域销毁。消费掉恢复标志，后续操作回到常规流程。
         isRestoringFromPip = false;
-        return;
+        return true;
       }
       _autoPlay.value = false;
       videoState.value = false;
@@ -1228,6 +1236,7 @@ class VideoDetailController extends GetxController
         plPlayerController.triggerFullScreen(status: false);
       }
       result.toast();
+      return false;
     }
   }
 

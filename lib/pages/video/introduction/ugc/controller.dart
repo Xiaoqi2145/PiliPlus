@@ -512,8 +512,18 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
         ..onReset(isStein: isStein)
         ..bvid = bvid
         ..aid = aid
-        ..cid.value = cid
-        ..queryVideoUrl();
+        ..cid.value = cid;
+
+      // 播放地址获取失败时回滚到上一个视频：否则会留下"播放器停了但页面
+      // 指向新视频"的不一致状态。原先此处是 unawaited 级联调用，失败信息
+      // 无人接收，后台自动连播时表现为静默停播。
+      if (!await videoDetailCtr.queryVideoUrl()) {
+        videoDetailCtr
+          ..bvid = prevBvid
+          ..aid = prevAid
+          ..cid.value = prevCid;
+        return false;
+      }
 
       if (this.bvid != bvid) {
         reload = true;
