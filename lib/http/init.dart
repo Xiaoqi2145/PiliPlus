@@ -12,6 +12,7 @@ import 'package:PiliPlus/utils/accounts/account.dart';
 import 'package:PiliPlus/utils/accounts/account_manager/account_mgr.dart';
 import 'package:PiliPlus/utils/global_data.dart';
 import 'package:PiliPlus/utils/login_utils.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:archive/archive.dart';
@@ -248,7 +249,9 @@ class Request {
         return status != null && status >= 200 && status < 300;
       };
 
-    if (Platform.isIOS) _watchConnectivity();
+    // 移动端都可能发生 Wi-Fi/流量切换, 切换后旧连接池里的半开连接需要主动丢弃,
+    // 否则请求会一直命中死连接直到 receiveTimeout/idleTimeout 才被清理
+    if (PlatformUtils.isMobile) _watchConnectivity();
   }
 
   /*
