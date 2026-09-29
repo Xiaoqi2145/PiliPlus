@@ -391,7 +391,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
     VideoStackManager.increment(); // 追踪视频页面层级
 
-    PlPlayerController.setPlayCallBack(playCallBack);
+    // 闭包延迟求值：introController 依赖下方稍后才 Get.put 的三个分页
+    // controller，此处直接取属性会触发 LateInitializationError。
+    PlPlayerController.setPlayCallBack(
+      playCallBack,
+      skipToNext: () => introController.nextPlay(),
+      skipToPrevious: () => introController.prevPlay(),
+    );
     // GetX 已注册同一 tag 且实例有效时，Get.put 返回旧实例并丢弃新建的
     // candidate；candidate 构造时会调用 PlPlayerController.getInstance()。
     // 普通导航保持原有计数；只有确认处于同视频小窗恢复时才回收这条引用。
@@ -788,7 +794,11 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       videoDetailController.plPlayerController.pause();
     }
 
-    PlPlayerController.setPlayCallBack(playCallBack);
+    PlPlayerController.setPlayCallBack(
+      playCallBack,
+      skipToNext: () => introController.nextPlay(),
+      skipToPrevious: () => introController.prevPlay(),
+    );
 
     introController.startTimer();
 

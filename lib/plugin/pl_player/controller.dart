@@ -67,6 +67,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
 typedef PlayCallback = Future<void>? Function();
+typedef SkipCallback = bool Function();
 
 class _RateRequest {
   _RateRequest({
@@ -514,11 +515,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return _instance != null;
   }
 
-  static void setPlayCallBack(PlayCallback? playCallBack) {
+  static void setPlayCallBack(
+    PlayCallback? playCallBack, {
+    SkipCallback? skipToNext,
+    SkipCallback? skipToPrevious,
+  }) {
     _playCallBack = playCallBack;
+    _skipToNextCallBack = skipToNext;
+    _skipToPreviousCallBack = skipToPrevious;
   }
 
   static PlayCallback? _playCallBack;
+  static SkipCallback? _skipToNextCallBack;
+  static SkipCallback? _skipToPreviousCallBack;
 
   static Future<void>? playIfExists() {
     // The page callback is only an enhancement (it re-attaches page listeners
@@ -540,6 +549,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // Keep the in-page control bar hidden: this path serves media notification
     // and headset commands, which must not reveal the on-screen controls.
     return player.play(hideControls: false);
+  }
+
+  /// Headset/notification "next". Returns null when no page registered a skip
+  /// callback (or the registered one reports "already at the last item"), so
+  /// [VideoPlayerServiceHandler] can tell "handled" from "nothing to do".
+  static Future<void>? skipToNextIfExists() {
+    return (_skipToNextCallBack?.call() ?? false) ? Future<void>.value() : null;
+  }
+
+  static Future<void>? skipToPreviousIfExists() {
+    return (_skipToPreviousCallBack?.call() ?? false)
+        ? Future<void>.value()
+        : null;
   }
 
   // try to get PlayerStatus

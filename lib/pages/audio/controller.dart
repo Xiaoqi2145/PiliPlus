@@ -183,7 +183,9 @@ class AudioController extends GetxController
     videoPlayerServiceHandler
       ?..onPlay = onPlay
       ..onPause = onPause
-      ..onSeek = onSeek;
+      ..onSeek = onSeek
+      ..onSkipToNext = onSkipToNext
+      ..onSkipToPrevious = onSkipToPrevious;
 
     animController = AnimationController(
       vsync: this,
@@ -213,6 +215,18 @@ class AudioController extends GetxController
 
   Future<void>? onSeek(Duration duration) {
     return player?.seek(duration);
+  }
+
+  // 必须返回非 null 的 Future：handler 用 ?? 串联兜底，返回 null 会在
+  // 已是首/末集时穿透到栈下方视频页的切集回调。
+  Future<void> onSkipToNext() {
+    playNext();
+    return Future<void>.value();
+  }
+
+  Future<void> onSkipToPrevious() {
+    playPrev();
+    return Future<void>.value();
   }
 
   void _updateCurrItem(DetailItem item) {
@@ -914,6 +928,8 @@ class AudioController extends GetxController
       ?..onPlay = null
       ..onPause = null
       ..onSeek = null
+      ..onSkipToNext = null
+      ..onSkipToPrevious = null
       ..onVideoDetailDispose(hashCode.toString());
     _subscriptions?.forEach((e) => e.cancel());
     _subscriptions?.clear();

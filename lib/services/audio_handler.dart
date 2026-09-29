@@ -42,6 +42,8 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   Future<void>? Function()? onPlay;
   Future<void>? Function()? onPause;
   Future<void>? Function(Duration position)? onSeek;
+  Future<void>? Function()? onSkipToNext;
+  Future<void>? Function()? onSkipToPrevious;
 
   bool _isTransitioning = false;
   Timer? _pauseTimer;
@@ -72,6 +74,22 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     return (onSeek?.call(position) ??
         PlPlayerController.seekToIfExists(position, isSeek: false));
     // await player.seekTo(position);
+  }
+
+  // BaseAudioHandler implements these as no-ops, so without these overrides a
+  // headset/notification "next"/"previous" is silently swallowed.
+  @override
+  Future<void> skipToNext() {
+    return onSkipToNext?.call() ??
+        PlPlayerController.skipToNextIfExists() ??
+        Future.syncValue(null);
+  }
+
+  @override
+  Future<void> skipToPrevious() {
+    return onSkipToPrevious?.call() ??
+        PlPlayerController.skipToPreviousIfExists() ??
+        Future.syncValue(null);
   }
 
   void setMediaItem(MediaItem newMediaItem) {
@@ -108,6 +126,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
             ? AudioProcessingState.buffering
             : processingState,
         controls: [
+          if (!isLive) MediaControl.skipToPrevious,
           if (!isLive)
             const MediaControl(
               androidIcon: 'drawable/ic_player_rewind_10s',
@@ -132,7 +151,13 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
               label: 'Fast Forward',
               action: MediaAction.fastForward,
             ),
+          if (!isLive) MediaControl.skipToNext,
         ],
+        // Keep the pre-existing compact view on API < 33 (rewind/play-pause/
+        // fast-forward; live has a single play/pause control). The skip
+        // controls stay in the expanded notification. These indices must stay
+        // in range of the list above or the notification cannot be built.
+        androidCompactActionIndices: isLive ? const [0] : const [1, 2, 3],
         playing: playing,
         systemActions: const {MediaAction.seek},
       ),
