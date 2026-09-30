@@ -294,6 +294,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       onTapToReturn: () {
         // 不取消 position subscription，让它在新页面继续工作
         _logSponsorBlock('Returning from PiP, preserving positionSubscription');
+        // 小窗期间后台自动连播会把 bvid/cid 等字段改写成 nextPlay 之后的
+        // 那个视频，而 args 仍是进入小窗时的旧快照；展开回大窗要按当前
+        // 正在播的视频重建页面，否则会跳回列表创建时打开的那个视频。
+        videoDetailController.syncArgsWithPlayingVideo();
         final args = Map<String, dynamic>.from(videoDetailController.args);
         final progress =
             plPlayerController?.positionInMilliseconds ??
@@ -759,9 +763,11 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
     // 从应用内小窗返回：关闭小窗，把播放控制权交回本页
     if (PipOverlayService.isInPipMode) {
-      final String? targetContextKey = PipOverlayService.contextKeyFromArgs(
-        videoDetailController.args,
-      );
+      // 用 controller 的实时状态推导上下文 key：小窗期间后台自动连播会改写
+      // bvid/cid，`args` 却停留在进入小窗时的旧视频上，拿它比对会把"同一
+      // 视频"误判成"别的视频"而走销毁式关闭（暂停 + 重开媒体）。
+      final String? targetContextKey =
+          PipOverlayService.contextKeyFromController(videoDetailController);
       if (PipOverlayService.savedVideoContextKey == targetContextKey) {
         // 小窗播的就是本页视频：非销毁式关闭，保留播放器供本页续用。
         // callOnClose 会 pause，而本页随后会再次 playerInit 重新 open，

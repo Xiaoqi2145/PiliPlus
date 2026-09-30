@@ -1464,6 +1464,29 @@ class VideoDetailController extends GetxController
     }
   }
 
+  /// 用 controller 当前实际承载的视频身份刷新路由参数 [args]。
+  ///
+  /// 小窗期间的后台自动连播（`nextPlay` → `onChangeEpisode`）只改写
+  /// bvid/aid/cid/epId/seasonId 等字段，从不回写 args；而"小窗展开回大窗"
+  /// 会带着 args 重建页面。若不同步，重建出的页面会退回进入小窗时（通常
+  /// 就是创建播放列表时）打开的那个视频，列表索引也会一起错位。
+  void syncArgsWithPlayingVideo() {
+    PipOverlayService.syncPlayingVideoToArgs(
+      args,
+      videoType: videoType,
+      bvid: bvid,
+      aid: aid,
+      cid: cid.value,
+      epId: epId,
+      seasonId: seasonId,
+      isVertical: isVertical.value,
+      cover: cover.value,
+      fileEntry: isFileSource ? entry : null,
+      // 本地播放的标题取自 entry，不同步会让恢复页停留在上一个视频的标题
+      fileTitle: isFileSource ? entry.showTitle : null,
+    );
+  }
+
   void makeHeartBeat() {
     if (plPlayerController.enableHeart &&
         !plPlayerController.playerStatus.isCompleted &&

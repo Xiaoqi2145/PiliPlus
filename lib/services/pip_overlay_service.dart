@@ -75,7 +75,7 @@ class PipOverlayService {
     stopPip(
       callOnClose: false,
       immediate: true,
-      targetContextKey: _savedVideoContextKey,
+      targetContextKey: savedVideoContextKey,
     );
   }
 
@@ -92,9 +92,17 @@ class PipOverlayService {
   // 保存控制器引用，防止被 GC
   static dynamic _savedController;
   static PlPlayerController? _savedPlayerController;
-  static String? _savedVideoContextKey;
-  static String? get savedVideoContextKey => _savedVideoContextKey;
   static final Map<String, dynamic> _savedControllers = {};
+
+  /// 小窗当前承载的视频上下文 key，实时由持有它的 controller 推导。
+  ///
+  /// 不能再用"进入小窗时定格"的快照：小窗期间后台自动连播
+  /// (`nextPlay` → `onChangeEpisode`) 只改写 controller 的
+  /// bvid/aid/cid/epId/seasonId，不会回写路由 args。若这里返回旧视频的 key，
+  /// 展开回大窗时"同一个视频"的判断就会错位，恢复页会按旧视频重建并把
+  /// 播放列表拉回创建列表时打开的那个视频。
+  static String? get savedVideoContextKey =>
+      contextKeyFromController(_savedController);
 
   static bool isVideoLikeRoute(String route) {
     return route.startsWith('/video') || route.startsWith('/liveRoom');
@@ -192,7 +200,8 @@ class PipOverlayService {
     );
   }
 
-  static String? _contextKeyFromController(dynamic controller) {
+  /// 由 controller 的实时状态推导视频上下文 key（非视频 controller 返回 null）。
+  static String? contextKeyFromController(dynamic controller) {
     if (controller is! VideoDetailController) {
       return null;
     }
@@ -203,6 +212,51 @@ class PipOverlayService {
       epId: controller.epId,
       seasonId: controller.seasonId,
     );
+  }
+
+  /// 把小窗中"此刻正在播放的视频"写回路由参数 [args]。
+  ///
+  /// `args` 是页面创建时的快照，而小窗期间的后台自动连播
+  /// (`nextPlay` → `onChangeEpisode`) 只改写 controller 的字段，从不回写
+  /// args。展开回大窗时页面完全按 args 重建，所以必须先在此对齐，否则会退回
+  /// 进入小窗时（通常就是创建播放列表时）打开的那个视频，列表索引也随之错位。
+  ///
+  /// 纯函数：不读取任何 controller/全局状态，便于单测覆盖。
+  static void syncPlayingVideoToArgs(
+    Map args, {
+    required Object? videoType,
+    required String bvid,
+    required int aid,
+    required int cid,
+    int? epId,
+    int? seasonId,
+    required bool isVertical,
+    String? cover,
+    Object? fileEntry,
+    String? fileTitle,
+  }) {
+    args['videoType'] = videoType;
+    args['bvid'] = bvid;
+    args['aid'] = aid;
+    args['cid'] = cid;
+    args['epId'] = epId;
+    args['seasonId'] = seasonId;
+    args['isVertical'] = isVertical;
+    if (cover != null && cover.isNotEmpty) {
+      args['cover'] = cover;
+    }
+    if (fileEntry != null) {
+      args['entry'] = fileEntry;
+    }
+    if (fileTitle != null) {
+      args['title'] = fileTitle;
+    }
+    // oid 是"列表当前项"锚点：首次拉取播放列表时用它配合 with_current
+    // 命中当前视频所在的那一页。不同步会让重建的页面从旧锚点拉列表，
+    // currentIndex 找不到当前视频时 nextPlay 会跳回列表开头。
+    if (args['isContinuePlaying'] == true) {
+      args['oid'] = aid;
+    }
   }
 
   static void startPip({
@@ -233,7 +287,6 @@ class PipOverlayService {
     _onTapToReturnCallback = onTapToReturn;
     _savedController = controller;
     _savedPlayerController = plPlayerController;
-    _savedVideoContextKey = _contextKeyFromController(controller);
     if (additionalControllers != null) {
       _savedControllers.addAll(additionalControllers);
     }
@@ -276,7 +329,6 @@ class PipOverlayService {
         _overlayEntry = null;
         _savedController = null;
         _savedPlayerController = null;
-        _savedVideoContextKey = null;
         _savedControllers.clear();
       }
     });
@@ -299,13 +351,17 @@ class PipOverlayService {
       return;
     }
 
+    // 关闭前先取一次"小窗当前视频"的 key：小窗期间后台自动连播会改写
+    // controller 的 bvid/cid，实时取值才能与恢复页上报的 targetContextKey
+    // 正确比对；下面清空 _savedController 后该 getter 会返回 null。
+    final String? savedKey = savedVideoContextKey;
     final bool shouldResetState = targetContextKey == null
         ? resetState
-        : targetContextKey != _savedVideoContextKey;
+        : targetContextKey != savedKey;
 
     if (kDebugMode) {
       debugPrint(
-        '[PiP] Stopping PiP mode (immediate: $immediate, callOnClose: $callOnClose, shouldResetState: $shouldResetState, targetContextKey: $targetContextKey, savedContextKey: $_savedVideoContextKey)',
+        '[PiP] Stopping PiP mode (immediate: $immediate, callOnClose: $callOnClose, shouldResetState: $shouldResetState, targetContextKey: $targetContextKey, savedContextKey: $savedKey)',
       );
     }
 
@@ -332,7 +388,7 @@ class PipOverlayService {
     if (kDebugMode &&
         (_savedController != null || _savedControllers.isNotEmpty)) {
       debugPrint(
-        '[PiP] Clearing cached controllers, resetState: $shouldResetState, targetContextKey: $targetContextKey, savedContextKey: $_savedVideoContextKey',
+        '[PiP] Clearing cached controllers, resetState: $shouldResetState, targetContextKey: $targetContextKey, savedContextKey: $savedKey',
       );
     }
 
@@ -351,7 +407,6 @@ class PipOverlayService {
 
     _savedController = null;
     _savedPlayerController = null;
-    _savedVideoContextKey = null;
     _savedControllers.clear();
 
     final overlayToRemove = _overlayEntry;
