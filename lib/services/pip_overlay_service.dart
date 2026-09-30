@@ -94,6 +94,73 @@ class PipOverlayService {
   static PlPlayerController? _savedPlayerController;
   static final Map<String, dynamic> _savedControllers = {};
 
+  // 小窗会话从"正在销毁的视频页"接管的播放监听。
+  //
+  // 应用内小窗是 pop 视频页时开启的：页面 dispose() 若照常摘掉监听，小窗里
+  // 就再没有人能收到 stream.completed——小窗内容(PipMiniVideoContent)本身
+  // 不注册状态监听——于是播完停在片尾，无人调用 introController.nextPlay()
+  // 连播下一集；过渡态兜底到期后还会把前台服务/唤醒锁一起收走，后台表现为
+  // "卡住"。所以页面销毁时把这对监听交给小窗会话保管，由 [stopPip] 统一摘除
+  // （恢复页的监听在 stopPip 之后才挂载，不会重复）。
+  static ValueChanged<PlayerStatus>? _adoptedStatusListener;
+  static ValueChanged<Duration>? _adoptedPositionListener;
+
+  /// 小窗会话当前托管的 controller 是否就是 [controller]（与相位无关）。
+  static bool isSavedVideoController(VideoDetailController controller) =>
+      identical(_savedController, controller);
+
+  /// 本页的视频 controller 是否正被小窗会话接管（据此决定监听归属）。
+  static bool ownsVideoController(VideoDetailController controller) =>
+      isInPipMode && isSavedVideoController(controller);
+
+  /// 播放链路是否仍应继续工作。
+  ///
+  /// 小窗是从视频页 pop 时开启的，路由随即销毁、isClosed 变 true，但播放
+  /// 并未结束：播完自动连播、CDN 地址过期恢复、并发查询补跑都必须继续。
+  /// 只有"已关闭且无人托管"的 controller 才该被拦住。
+  static bool keepsPlaybackAlive({
+    required bool isClosed,
+    required bool ownedByPip,
+  }) => !isClosed || ownedByPip;
+
+  /// 页面销毁时是否把播放监听移交给小窗会话。
+  ///
+  /// 三个条件缺一不可：小窗处于活跃相位、托管的正是本页 controller、播放器
+  /// 实例仍存活（为空则无从挂载）。否则照常摘除，避免监听被留在一个不会再被
+  /// 清理的会话里。
+  static bool shouldHandOverListeners({
+    required bool inPipMode,
+    required bool savedControllerMatches,
+    required bool hasPlayer,
+  }) => inPipMode && savedControllerMatches && hasPlayer;
+
+  /// 由即将销毁的视频页把播放监听交给小窗会话：接管期间由它继续驱动
+  /// 播完自动连播，避免小窗里播放停在 EOF。
+  static void adoptPlaybackListeners({
+    required PlPlayerController plPlayerController,
+    required ValueChanged<PlayerStatus> onStatus,
+    required ValueChanged<Duration> onPosition,
+  }) {
+    _adoptedStatusListener = onStatus;
+    _adoptedPositionListener = onPosition;
+    plPlayerController
+      ..addStatusLister(onStatus)
+      ..addPositionListener(onPosition);
+  }
+
+  /// 摘除被接管的监听（未接管时是 no-op，不影响页面自己挂的那一份）。
+  static void releaseAdoptedPlaybackListeners() {
+    final status = _adoptedStatusListener;
+    final position = _adoptedPositionListener;
+    if (status == null && position == null) return;
+    _adoptedStatusListener = null;
+    _adoptedPositionListener = null;
+    final player = _savedPlayerController;
+    if (player == null) return;
+    if (status != null) player.removeStatusLister(status);
+    if (position != null) player.removePositionListener(position);
+  }
+
   /// 小窗当前承载的视频上下文 key，实时由持有它的 controller 推导。
   ///
   /// 不能再用"进入小窗时定格"的快照：小窗期间后台自动连播
@@ -324,6 +391,9 @@ class PipOverlayService {
           debugPrint('Error inserting pip overlay: $e');
         }
         _setSystemAutoPipEnabled(plPlayerController, false);
+        // 小窗没能建立：页面即将销毁，若不在此归还监听，它会被留在一个
+        // 已清空的会话里，之后无人摘除（弱引用住整页 State，且永不触发连播）
+        releaseAdoptedPlaybackListeners();
         isInPipMode = false;
         transition.reset();
         _overlayEntry = null;
@@ -404,6 +474,11 @@ class PipOverlayService {
         _setEnteringPipFlag(controller, false);
       }
     }
+
+    // 摘除小窗会话从已销毁页面接管的播放监听：必须在清空
+    // _savedPlayerController 之前执行（释放逻辑要用它取播放器实例）。
+    // 同视频恢复时新页面的监听是在 stopPip 之后才挂上的，不会误摘。
+    releaseAdoptedPlaybackListeners();
 
     _savedController = null;
     _savedPlayerController = null;

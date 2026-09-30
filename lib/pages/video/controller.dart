@@ -821,6 +821,18 @@ class VideoDetailController extends GetxController
     return null;
   }
 
+  /// 小窗会话仍在托管本 controller 时，路由早已销毁（[isClosed] 为 true），
+  /// 但后台播放链路必须继续可用：播完自动连播、CDN 地址过期恢复、并发查询
+  /// 补跑都依赖它。只有真正无人持有的 controller 才该被 isClosed 拦住。
+  ///
+  /// 否则小窗里连播到下一集后，地址请求会被这些守卫静默丢弃：既拿不到新
+  /// 媒体源，也不会有人结束过渡态，前台服务与唤醒锁到期即被回收——即
+  /// "后台自动切集卡网络"。
+  bool get _isPlaybackOwnedByPip => PipOverlayService.keepsPlaybackAlive(
+    isClosed: isClosed,
+    ownedByPip: PipOverlayService.ownsVideoController(this),
+  );
+
   /// CDN 地址过期后的兜底：重新获取播放地址并重建媒体源。
   ///
   /// 仅在"当前播放器确实在播本 controller 的视频"时才接管——播放器是跨页面
@@ -830,7 +842,7 @@ class VideoDetailController extends GetxController
   /// 监听收尾为 `endTransition(playing: true)`），false 表示失败且已由
   /// `_queryVideoUrl` 结束过渡态。
   Future<bool> _recoverExpiredMediaSource() async {
-    if (isClosed || isFileSource) return false;
+    if (!_isPlaybackOwnedByPip || isFileSource) return false;
     if (plPlayerController.cid != cid.value) return false;
     if (videoUrl == null) return false;
     if (kDebugMode) {
@@ -900,7 +912,7 @@ class VideoDetailController extends GetxController
       );
     }
 
-    if (isClosed) return;
+    if (!_isPlaybackOwnedByPip) return;
 
     if (!isFileSource) {
       if (plPlayerController.enableBlock) {
@@ -1036,7 +1048,7 @@ class VideoDetailController extends GetxController
       return await _queryVideoUrl(fromReset, autoFullScreenFlag, generation);
     } finally {
       isQuerying = false;
-      if (_queryPending && !isClosed) {
+      if (_queryPending && _isPlaybackOwnedByPip) {
         _queryPending = false;
         final pendingFromReset = _pendingFromReset;
         final pendingAutoFullScreenFlag = _pendingAutoFullScreenFlag;

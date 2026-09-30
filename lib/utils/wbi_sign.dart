@@ -11,6 +11,7 @@ import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hive_ce/hive.dart';
 
 abstract final class WbiSign {
@@ -92,6 +93,25 @@ abstract final class WbiSign {
     }
   }
 
+  /// 仅供测试替换真实拉取实现（真实路径依赖网络与 Hive 缓存）。
+  @visibleForTesting
+  static Future<String> Function()? debugFetchKeysOverride;
+
+  /// 取密钥并在结束后清空 [_future]。
+  ///
+  /// 成功时密钥已落盘，下次调用走同步命中，不会多发请求；失败（异常或空串）
+  /// 时必须允许重取：[_future] 是进程级静态字段，若把一次失败的结果留在里面，
+  /// 之后每个 WBI 签名请求都会立刻拿到同一个失败结果（空密钥会让 w_rid 恒定
+  /// 错误，异常则直接重抛），**完全不再发起网络请求**。后台弱网下这会把
+  /// 自动连播的 playurl 全部打死，表现为"播完切集卡住"。
+  static Future<String> _fetchWbiKeys() async {
+    try {
+      return await (debugFetchKeysOverride ?? _getWbiKeys)();
+    } finally {
+      _future = null;
+    }
+  }
+
   static FutureOr<String> getWbiKeys() {
     final nowDate = DateTime.now();
     if (DateTime.fromMillisecondsSinceEpoch(
@@ -100,11 +120,13 @@ abstract final class WbiSign {
         nowDate.day) {
       final String? mixinKey = _localCache.get(LocalCacheKey.mixinKey);
       if (mixinKey != null) return mixinKey;
-      return _future ??= _getWbiKeys();
+      return _future ??= _fetchWbiKeys();
     } else {
       return _future = _localCache
           .put(LocalCacheKey.timeStamp, nowDate.millisecondsSinceEpoch)
-          .then((_) => _getWbiKeys());
+          .then((_) => _fetchWbiKeys())
+          // 连 put 都失败时同样不能把失败的 future 留在静态字段里
+          .whenComplete(() => _future = null);
     }
   }
 

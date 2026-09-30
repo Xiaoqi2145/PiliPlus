@@ -635,9 +635,29 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     VideoStackManager.decrement(); // 减少视频页面层级追踪
     final isInAppPip = PipOverlayService.isInPipMode;
 
-    plPlayerController
-      ?..removeStatusLister(playerListener)
-      ..removePositionListener(positionListener);
+    // 应用内小窗是在 pop 本页时开启的，因此小窗运行期间本页必然被销毁。
+    // 此时不能摘掉播放监听：小窗内容(PipMiniVideoContent)自身不注册状态
+    // 监听，摘掉之后 stream.completed 就再没人接——播放停在片尾，无人调用
+    // introController.nextPlay() 连播下一集，过渡态兜底到期还会把前台服务与
+    // 唤醒锁一并收走，后台表现为"卡住"。改为移交给小窗会话保管，
+    // 由 PipOverlayService.stopPip 在小窗结束时统一摘除。
+    if (PipOverlayService.shouldHandOverListeners(
+      inPipMode: PipOverlayService.isInPipMode,
+      savedControllerMatches: PipOverlayService.isSavedVideoController(
+        videoDetailController,
+      ),
+      hasPlayer: plPlayerController != null,
+    )) {
+      PipOverlayService.adoptPlaybackListeners(
+        plPlayerController: plPlayerController!,
+        onStatus: playerListener,
+        onPosition: positionListener,
+      );
+    } else {
+      plPlayerController
+        ?..removeStatusLister(playerListener)
+        ..removePositionListener(positionListener);
+    }
 
     Get.delete<HorizontalMemberPageController>(
       tag: videoDetailController.heroTag,
