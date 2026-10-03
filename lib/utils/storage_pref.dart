@@ -110,12 +110,34 @@ abstract final class Pref {
   );
   //   [0.5, 100.0, 2.2 * math.sqrt(50)], // [mass, stiffness, damping]
 
-  static List<double> get speedList => List<double>.from(
-    _video.get(
-      VideoBoxKey.speedsList,
-      defaultValue: const [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0],
-    ),
-  );
+  /// 倍速必须有限且大于 0：0 会被播放器拒绝（media_kit 的 `setRate` 直接抛
+  /// `ArgumentError`），负数会让 mpv 反向播放。历史版本允许把 0 存进列表并选为
+  /// 默认值，因此这里读取时一并过滤，不能只依赖写入校验。
+  static bool isValidSpeed(double? speed) =>
+      speed != null && speed.isFinite && speed > 0;
+
+  static List<double> get speedList {
+    final list = List<double>.from(
+      _video.get(
+        VideoBoxKey.speedsList,
+        defaultValue: const [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0],
+      ),
+    )..removeWhere((e) => !isValidSpeed(e));
+    return list.isEmpty ? const [1.0] : list;
+  }
+
+  static double get playSpeedDefault {
+    final speed = _video.get(VideoBoxKey.playSpeedDefault, defaultValue: 1.0);
+    return isValidSpeed(speed) ? speed : 1.0;
+  }
+
+  static double get longPressSpeedDefault {
+    final speed = _video.get(
+      VideoBoxKey.longPressSpeedDefault,
+      defaultValue: 3.0,
+    );
+    return isValidSpeed(speed) ? speed : 3.0;
+  }
 
   static List<Pair<SegmentType, SkipType>> get blockSettings {
     final list = _setting.get(SettingBoxKey.blockSettings) as List?;
@@ -870,12 +892,6 @@ abstract final class Pref {
 
   static bool get enableAutoLongPressSpeed =>
       _setting.get(SettingBoxKey.enableAutoLongPressSpeed, defaultValue: false);
-
-  static double get playSpeedDefault =>
-      _video.get(VideoBoxKey.playSpeedDefault, defaultValue: 1.0);
-
-  static double get longPressSpeedDefault =>
-      _video.get(VideoBoxKey.longPressSpeedDefault, defaultValue: 3.0);
 
   static bool get defaultShowComment =>
       _setting.get(SettingBoxKey.defaultShowComment, defaultValue: false);

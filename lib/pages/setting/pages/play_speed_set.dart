@@ -89,20 +89,23 @@ class _PlaySpeedPageState extends State<PlaySpeedPage> {
           ),
           TextButton(
             onPressed: () {
-              try {
-                final val = double.parse(initialValue);
-                if (speedList.contains(val)) {
-                  SmartDialog.showToast('该倍速已存在');
-                } else {
-                  Get.back();
-                  speedList
-                    ..add(val)
-                    ..sort();
-                  video.put(VideoBoxKey.speedsList, speedList);
-                  setState(() {});
-                }
-              } catch (e) {
-                SmartDialog.showToast(e.toString());
+              final val = double.tryParse(initialValue);
+              if (val == null) {
+                SmartDialog.showToast('请输入有效倍速');
+              } else if (!Pref.isValidSpeed(val)) {
+                // 0 与负数都会被播放器拒绝（media_kit 的 setRate 直接抛
+                // ArgumentError），一旦存进列表还能被选为默认/长按倍速，
+                // 之后长按只会显示一个并不生效的倍速。
+                SmartDialog.showToast('倍速必须大于 0');
+              } else if (speedList.contains(val)) {
+                SmartDialog.showToast('该倍速已存在');
+              } else {
+                Get.back();
+                speedList
+                  ..add(val)
+                  ..sort();
+                video.put(VideoBoxKey.speedsList, speedList);
+                setState(() {});
               }
             },
             child: const Text('确认'),

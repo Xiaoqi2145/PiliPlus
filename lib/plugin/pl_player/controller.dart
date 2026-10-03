@@ -907,7 +907,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return player;
   }
 
-  late final buffer = Pref.initBuffer(_playbackSpeed.value);
+  /// 当前生效的缓冲参数，随常规倍速重建。
+  ///
+  /// `cache-secs` / `demuxer-hysteresis-secs` 由 [Pref.initBuffer] 按倍速缩放：
+  /// 倍速越高，单位实际时间消费的媒体越多，时间目标必须同步放大。原先的
+  /// `late final` 只在首次读取时算一次，之后每次建源都复用旧倍速算出的目标。
+  late Map<String, String> buffer = Pref.initBuffer(_normalPlaybackSpeed);
   late final liveBuffer = Pref.initLiveBuffer();
 
   // 配置播放器
@@ -1046,6 +1051,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           }
           playerStatus.value = .playing;
         } else {
+          // 播放停下（暂停、音频焦点中断、播放完成）意味着长按手势已经结束。
+          // 移动端长按期间指针被识别器独占，抬手不会走 onLongPressEnd；桌面端
+          // 按空格、或按住 → 时窗口失焦，也都不会回调长按结束。此处不清理的话，
+          // 提升后的倍速会一直留在播放器上，直到用户再长按一次或切源。
+          _endLongPressSessionOnStop();
           _wakeLockTimer?.cancel();
           _wakeLockTimer = Timer(
             const Duration(milliseconds: 500),
@@ -1314,6 +1324,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _clearLongPressSession();
   }
 
+  /// 播放停下时收尾长按会话，把倍速还原为长按前的常规值。
+  ///
+  /// 刻意复用 [setLongPressStatus] 的结束分支而不是自己再发一次
+  /// [_requestPlaybackRate]：结束分支已经处理了基准倍速回退、代次校验与
+  /// 会话字段清理，多一条恢复路径就多一处可能与它不一致的地方。
+  ///
+  /// 由播放状态监听调用，因此必须是同步且幂等的：没有会话时立即返回。
+  void _endLongPressSessionOnStop() {
+    if (!_longPressSessionActive && !longPressStatus.value) return;
+    unawaited(setLongPressStatus(false));
+  }
+
   /// Drops every trace of an in-flight long-press session.
   ///
   /// Kept in one place so a newly added session field cannot be forgotten in
@@ -1417,19 +1439,31 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             );
           }
 
-          final actualRate = player.state.rate > 0
+          // 以 mpv 回读值为准；读不到时退回 state.rate 并保持原有宽容行为。
+          final nativeRate = _readNativePlaybackRate(player);
+          final actualRate = nativeRate ?? (player.state.rate > 0
               ? player.state.rate
-              : request.speed;
-          _commitPlaybackRate(
-            actualRate,
-            updateNormalSpeed: request.updateNormalSpeed,
-          );
+              : request.speed);
           _traceLongPressRate(
             'state.rate',
             requestId: requestId,
             target: actualRate,
             source: request.source,
             sessionId: request.sessionId,
+          );
+
+          // mpv 回读明确否定了本次请求：属性写入被拒绝，state.rate 是乐观值。
+          // 此时必须走失败分支，否则 UI 与弹幕会按一个并未生效的倍速运行。
+          if (nativeRate != null &&
+              (nativeRate - request.speed).abs() >= 0.0001) {
+            throw StateError(
+              'mpv rejected rate ${request.speed}, actual $nativeRate',
+            );
+          }
+
+          _commitPlaybackRate(
+            actualRate,
+            updateNormalSpeed: request.updateNormalSpeed,
           );
           if (request.source == 'longPressRestoreAfterError' &&
               request.sessionId == _longPressGeneration) {
@@ -1487,6 +1521,29 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  /// 读回 mpv 实际生效的倍速，无法确认时返回 null。
+  ///
+  /// 为什么不能信 [Player.state]`.rate`：fork 的 `setRate` 先写 `state.rate`
+  /// 再提交 mpv 属性，而 `_setPropertyDouble` 的失败只经 `_logError` 记一条日志、
+  /// 不抛异常（real.dart 的 `_setProperty` → `completer.future.then(_logError)`）。
+  /// 因此 mpv 拒绝该速度时 await 仍正常返回，`state.rate` 是乐观写入，不能作为
+  /// 原生成功的证据。观测列表里也没有 `speed`，事件流不会纠正它。
+  ///
+  /// 仅在 `pitch` 关闭时可用：开启后实际速度由 `af=scaletempo` 决定，`speed`
+  /// 属性不再是真实倍速，此时返回 null 让调用方沿用旧逻辑。
+  double? _readNativePlaybackRate(NativePlayer player) {
+    if (player.configuration.pitch) return null;
+    try {
+      final raw = player.getProperty('speed');
+      if (raw.isEmpty) return null;
+      final value = double.tryParse(raw);
+      if (value == null || !value.isFinite || value <= 0) return null;
+      return value;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _completeRateRequest(_RateRequest request) {
     if (!request.completer.isCompleted) {
       request.completer.complete();
@@ -1502,6 +1559,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _playbackSpeed.value = speed;
     if (updateNormalSpeed) {
       _normalPlaybackSpeed = speed;
+      // 缓冲目标按倍速缩放，常规倍速变了就必须重算，否则下一个媒体源仍会用
+      // 旧倍速算出的 cache-secs（例如一直按 1x 的 30 秒目标跑 3x）。
+      _refreshBufferForSpeed(speed);
     }
     if (danmakuController != null && previousSpeed != speed) {
       try {
@@ -1511,6 +1571,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           staticDuration: currentOption.staticDuration * previousSpeed / speed,
         );
         danmakuController!.updateOption(updatedOption);
+      } catch (_) {}
+    }
+  }
+
+  /// 按新的常规倍速重算缓冲参数，并尽力推给当前媒体源。
+  ///
+  /// 推属性只影响正在播放的媒体源；下次 [setDataSource] 会直接用新 map 建源，
+  /// 两条路径合起来才能保证「改倍速」和「切集」后目标一致。mpv 的 `cache-secs`
+  /// 是 demuxer 选项，部分后端只在下一次 `open` 时读取，因此推送失败不算错误。
+  void _refreshBufferForSpeed(double speed) {
+    final rebuilt = Pref.initBuffer(speed);
+    buffer = rebuilt;
+    final player = _videoPlayerController;
+    if (player == null || isLive) return;
+    for (final entry in rebuilt.entries) {
+      try {
+        player.setProperty(entry.key, entry.value);
       } catch (_) {}
     }
   }
