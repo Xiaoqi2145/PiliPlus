@@ -47,7 +47,7 @@ class AudioSessionHandler {
 
     _session.interruptionEventStream.listen((event) async {
       final player = PlPlayerController.instance;
-      final playerStatus = player?.playerStatus.value;
+      final playerStatus = player?.playerStatus;
       if (event.begin) {
         if (player == null || playerStatus != PlayerStatus.playing) return;
         switch (event.type) {

@@ -13,6 +13,7 @@ import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
+import 'package:PiliPlus/utils/ios/pip_helper.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
@@ -221,7 +222,7 @@ List<SettingsModel> get playSettings => [
     setKey: SettingBoxKey.enableInAppPip,
     defaultVal: true,
   ),
-  if (Platform.isAndroid) ...[
+  if (Platform.isAndroid || IOSPipHelper.isAvailable)
     SwitchModel(
       title: '后台画中画',
       subtitle: '进入后台时以小窗形式（PiP）播放',
@@ -229,11 +230,15 @@ List<SettingsModel> get playSettings => [
       setKey: SettingBoxKey.autoPiP,
       defaultVal: false,
       onChanged: (val) {
-        if (val && !videoPlayerServiceHandler!.enableBackgroundPlay) {
+        if (val &&
+            Platform.isAndroid &&
+            !videoPlayerServiceHandler!.enableBackgroundPlay) {
           SmartDialog.showToast('建议开启后台音频服务');
         }
       },
     ),
+  // PiP on iOS only shows the video frames, without danmaku.
+  if (Platform.isAndroid) ...[
     const SwitchModel(
       title: '应用内小窗转后台画中画（实验性）',
       subtitle: '实验性功能：应用内小窗存在时，退到后台自动切换为系统 PiP；可能因系统差异出现异常',

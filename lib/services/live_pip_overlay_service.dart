@@ -795,8 +795,7 @@ class _LivePipWidgetState extends State<LivePipWidget>
                                               final isPlaying =
                                                   widget
                                                       .plPlayerController
-                                                      .playerStatus
-                                                      .value ==
+                                                      .playerStatus ==
                                                   PlayerStatus.playing;
                                               return PipControlButton(
                                                 targetSize: bottomControl,
