@@ -23,6 +23,8 @@ import 'package:PiliPlus/pages/common/common_intro_controller.dart'
     show FavMixin;
 import 'package:PiliPlus/pages/dynamics_repost/view.dart';
 import 'package:PiliPlus/pages/main_reply/view.dart';
+import 'package:PiliPlus/pages/setting/models/play_settings.dart'
+    show kMaxVolume;
 import 'package:PiliPlus/pages/sponsor_block/block_mixin.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/triple_mixin.dart';
@@ -469,6 +471,13 @@ class AudioController extends GetxController
           'volume': PlatformUtils.isDesktop
               ? (desktopVolume.value * 100).toString()
               : Pref.playerVolume.toString(),
+          // 音量上限。mpv 的 volume-max 默认会截断高于 100(部分版本 130)的音量，
+          // 使设置里的音量档位失效：移动端 Pref.playerVolume 可选 100~300%，
+          // 桌面端 desktopVolume 可选 0~200%。此项随 media-kit 回滚被上游一并
+          // 删除（ee148aa64），此处按基线恢复，且必须无条件添加——平台判定若
+          // 写成 if (PlatformUtils.isDesktop)，会因 vm:platform-const 在 Android
+          // 上被编译期消除，导致移动端音量上限丢失。
+          'volume-max': kMaxVolume.toString(),
           ...Pref.initBuffer(),
         },
       ),

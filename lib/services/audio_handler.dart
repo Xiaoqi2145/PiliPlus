@@ -201,12 +201,14 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     // the foreground service would never be kept alive.
     final newConfig = (status, isBuffering, isLive, speed, _isTransitioning);
     if (_lastConfig == newConfig) {
-      if (_lastPos != null) {
-        final pos = position.inSeconds;
-        final lastPos = _lastPos!.inSeconds;
-        _lastPos = position;
-        if (pos == lastPos && pos != 0) return;
-      }
+      // 位置去重：_lastPos 必须在这里先落值，否则它永远是 null，
+      // 下面的早退分支永远进不去，去重形同失效（每次回调都全量发布）。
+      final lastPos = _lastPos?.inSeconds;
+      final pos = position.inSeconds;
+      _lastPos = position;
+      if (lastPos != null && pos == lastPos && pos != 0) return;
+    } else {
+      _lastPos = position;
     }
     _lastConfig = newConfig;
 

@@ -289,6 +289,18 @@ class _LivePipWidgetState extends State<LivePipWidget>
   bool _isClosing = false;
   bool _isRefreshing = false;
 
+  // 播放/暂停图标的数据源。
+  //
+  // 去 Rx 化后 `playerStatus` 已是普通枚举，原先包住该图标的 Obx 闭包内再无任何
+  // Rx 读取，GetX 会在 build 期抛 "improper use of a GetX"。release 下该异常会把
+  // 子树替换成 RenderErrorBox（sizedByParent、固有尺寸 100000×100000、近白色），
+  // 在只给 bottom 的 Positioned 里高度无界，于是渲染出一块巨幅白块并挤掉两侧按钮。
+  // 改为订阅控制器自身的状态监听，在 setState 中刷新。
+  void _onPlayerStatusChanged(PlayerStatus status) {
+    if (!mounted) return;
+    setState(() {});
+  }
+
   PipTransitionCoordinator get _transition => LivePipOverlayService.transition;
   PipPhase _lastPhase = PipPhase.hidden;
 
@@ -321,6 +333,7 @@ class _LivePipWidgetState extends State<LivePipWidget>
     } else {
       _startHideTimer();
     }
+    widget.plPlayerController.addStatusLister(_onPlayerStatusChanged);
   }
 
   void _onPhaseChanged() {
@@ -369,6 +382,7 @@ class _LivePipWidgetState extends State<LivePipWidget>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _transition.removeListener(_onPhaseChanged);
+    widget.plPlayerController.removeStatusLister(_onPlayerStatusChanged);
     _phaseCtr
       ..removeStatusListener(_onPhaseAnimStatus)
       ..dispose();
@@ -791,33 +805,32 @@ class _LivePipWidgetState extends State<LivePipWidget>
                                         // 播放/暂停
                                         Expanded(
                                           child: Center(
-                                            child: Obx(() {
-                                              final isPlaying =
-                                                  widget
-                                                      .plPlayerController
-                                                      .playerStatus ==
-                                                  PlayerStatus.playing;
-                                              return PipControlButton(
-                                                targetSize: bottomControl,
-                                                onTap: () {
-                                                  _resetHideTimer();
-                                                  if (isPlaying) {
-                                                    widget.plPlayerController
-                                                        .pause();
-                                                  } else {
-                                                    widget.plPlayerController
-                                                        .play();
-                                                  }
-                                                },
-                                                icon: Icon(
-                                                  isPlaying
-                                                      ? Icons.pause
-                                                      : Icons.play_arrow,
-                                                  color: Colors.white,
-                                                  size: 30,
-                                                ),
-                                              );
-                                            }),
+                                            child: PipControlButton(
+                                              targetSize: bottomControl,
+                                              onTap: () {
+                                                _resetHideTimer();
+                                                if (widget
+                                                    .plPlayerController
+                                                    .playerStatus
+                                                    .isPlaying) {
+                                                  widget.plPlayerController
+                                                      .pause();
+                                                } else {
+                                                  widget.plPlayerController
+                                                      .play();
+                                                }
+                                              },
+                                              icon: Icon(
+                                                widget
+                                                        .plPlayerController
+                                                        .playerStatus
+                                                        .isPlaying
+                                                    ? Icons.pause
+                                                    : Icons.play_arrow,
+                                                color: Colors.white,
+                                                size: 30,
+                                              ),
+                                            ),
                                           ),
                                         ),
                                         // 刷新:直播卡死自救;低频操作降为

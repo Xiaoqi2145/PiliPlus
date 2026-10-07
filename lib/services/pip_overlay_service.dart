@@ -588,6 +588,57 @@ class _PipWidgetState extends State<PipWidget>
   bool _showControls = true;
   Timer? _hideTimer;
 
+  // 播放/暂停图标的数据源。
+  //
+  // 去 Rx 化后 `PlPlayerController.playerStatus` 已是普通枚举，原先包住该图标的
+  // Obx 闭包内再无任何 Rx 读取，GetX 会在 build 期抛 "improper use of a GetX"。
+  // release 下该异常会把子树替换成 RenderErrorBox：它是 sizedByParent 且固有尺寸
+  // 100000×100000，而此处 Positioned 只给了 bottom(高度无界)，于是渲染出一块
+  // 近白(0xF0C0C0C0)的巨幅色块，把后退/前进按钮挤出可视区——表现为"只剩关闭与
+  // 全屏，暂停位一片白"。改为订阅控制器自身的状态监听并在 setState 中刷新。
+  PlPlayerController? _controlPlayer;
+  // 监听是否确实挂上。`addStatusLister` 在 `_playerCount == 0`（播放器尚未
+  // 就绪）时是静默 no-op，若只凭 `identical(player, _controlPlayer)` 短路，
+  // 首次绑定失败后将永不重试，图标会一直停在旧状态。
+  bool _controlPlayerBound = false;
+
+  void _onPlayerStatusChanged(PlayerStatus status) {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  /// 绑定/解绑播放状态监听；小窗托管的 controller 可能在会话期间才就绪，
+  /// 也可能在就绪前被替换，因此这里每次都尝试补挂。
+  void _bindControlPlayer() {
+    final player = PipOverlayService.getSavedController<VideoDetailController>()
+        ?.plPlayerController;
+    if (identical(player, _controlPlayer) && _controlPlayerBound) return;
+    if (!identical(player, _controlPlayer)) {
+      _controlPlayer?.removeStatusLister(_onPlayerStatusChanged);
+      _controlPlayer = player;
+      _controlPlayerBound = false;
+    }
+    if (player == null) return;
+    player.addStatusLister(_onPlayerStatusChanged);
+    _controlPlayerBound = true;
+  }
+
+  /// 快进/快退 [seconds] 秒。
+  ///
+  /// 位置取 [PlPlayerController.positionInMilliseconds] 而非 `position`：
+  /// 后者是秒级节流值，会带来最多 1 秒的误差。并按 [0, duration] 夹取，
+  /// 避免片头后退或片尾前进越界（seekTo 只兜住下界）。
+  void _skipBy(int seconds) {
+    final plController = _controlPlayer;
+    if (plController == null) return;
+    final total = plController.durationInMilliseconds;
+    var target =
+        plController.positionInMilliseconds + seconds * 1000;
+    if (target < 0) target = 0;
+    if (total > 0 && target > total) target = total;
+    plController.seekTo(Duration(milliseconds: target));
+  }
+
   /// 单击切换控制栏前的状态，供双击成立时回滚。
   bool? _controlsBeforeTap;
   // 桌面端:鼠标悬停时控制栏保持显示,移出即隐藏
@@ -612,6 +663,7 @@ class _PipWidgetState extends State<PipWidget>
     } else {
       _startHideTimer();
     }
+    _bindControlPlayer();
   }
 
   void _onPhaseChanged() {
@@ -631,6 +683,9 @@ class _PipWidgetState extends State<PipWidget>
           _phaseCtr.stop();
       }
     }
+    // 会话期间的 controller 可能变化(如后台自动连播重建播放器),
+    // 相位推进时顺带校正监听归属。
+    _bindControlPlayer();
     if (mounted) setState(() {});
   }
 
@@ -663,6 +718,8 @@ class _PipWidgetState extends State<PipWidget>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _transition.removeListener(_onPhaseChanged);
+    _controlPlayer?.removeStatusLister(_onPlayerStatusChanged);
+    _controlPlayer = null;
     _phaseCtr
       ..removeStatusListener(_onPhaseAnimStatus)
       ..dispose();
@@ -1125,26 +1182,7 @@ class _PipWidgetState extends State<PipWidget>
                                               targetSize: bottomControl,
                                               onTap: () {
                                                 _resetHideTimer();
-                                                final controller =
-                                                    PipOverlayService
-                                                        .getSavedController<
-                                                          VideoDetailController
-                                                        >();
-                                                final plController =
-                                                    controller
-                                                        ?.plPlayerController;
-                                                if (plController != null) {
-                                                  final current = Duration(
-                                                    seconds: plController
-                                                        .position.value,
-                                                  );
-                                                  plController.seekTo(
-                                                    current -
-                                                        const Duration(
-                                                          seconds: 10,
-                                                        ),
-                                                  );
-                                                }
+                                                _skipBy(-10);
                                               },
                                               icon: const Icon(
                                                 Icons.replay_10,
@@ -1158,37 +1196,34 @@ class _PipWidgetState extends State<PipWidget>
                                         // 播放/暂停
                                         Expanded(
                                           child: Center(
-                                            child: Obx(() {
-                                              final controller =
-                                                  PipOverlayService
-                                                      .getSavedController<
-                                                        VideoDetailController
-                                                      >();
-                                              final plController =
-                                                  controller
-                                                      ?.plPlayerController;
-                                              final isPlaying =
-                                                  plController?.playerStatus ==
-                                                  PlayerStatus.playing;
-                                              return PipControlButton(
-                                                targetSize: bottomControl,
-                                                onTap: () {
-                                                  _resetHideTimer();
-                                                  if (isPlaying) {
-                                                    plController?.pause();
-                                                  } else {
-                                                    plController?.play();
-                                                  }
-                                                },
-                                                icon: Icon(
-                                                  isPlaying
-                                                      ? Icons.pause
-                                                      : Icons.play_arrow,
-                                                  color: Colors.white,
-                                                  size: 30,
-                                                ),
-                                              );
-                                            }),
+                                            child: PipControlButton(
+                                              targetSize: bottomControl,
+                                              onTap: () {
+                                                _resetHideTimer();
+                                                final plController =
+                                                    _controlPlayer;
+                                                if (plController == null) {
+                                                  return;
+                                                }
+                                                if (plController
+                                                    .playerStatus
+                                                    .isPlaying) {
+                                                  plController.pause();
+                                                } else {
+                                                  plController.play();
+                                                }
+                                              },
+                                              icon: Icon(
+                                                _controlPlayer
+                                                            ?.playerStatus
+                                                            .isPlaying ??
+                                                        false
+                                                    ? Icons.pause
+                                                    : Icons.play_arrow,
+                                                color: Colors.white,
+                                                size: 30,
+                                              ),
+                                            ),
                                           ),
                                         ),
                                         const SizedBox(width: 8),
@@ -1199,26 +1234,7 @@ class _PipWidgetState extends State<PipWidget>
                                               targetSize: bottomControl,
                                               onTap: () {
                                                 _resetHideTimer();
-                                                final controller =
-                                                    PipOverlayService
-                                                        .getSavedController<
-                                                          VideoDetailController
-                                                        >();
-                                                final plController =
-                                                    controller
-                                                        ?.plPlayerController;
-                                                if (plController != null) {
-                                                  final current = Duration(
-                                                    seconds: plController
-                                                        .position.value,
-                                                  );
-                                                  plController.seekTo(
-                                                    current +
-                                                        const Duration(
-                                                          seconds: 10,
-                                                        ),
-                                                  );
-                                                }
+                                                _skipBy(10);
                                               },
                                               icon: const Icon(
                                                 Icons.forward_10,
