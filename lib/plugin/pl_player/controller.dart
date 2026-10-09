@@ -2453,13 +2453,21 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     /// 正在进入应用内小窗时传 false：退出页面不应暂停播放
     bool pauseOnPop = true,
+
+    /// 正在进入应用内小窗时传 true：通知栏/耳机的切集回调要保留，
+    /// 否则 pop 后小窗里的视频收不到上一集/下一集指令。
+    bool preservePlayCallBack = false,
   }) {
     if (didPop) {
       if (pauseOnPop && playerStatus.isPlaying) {
         pause();
       }
 
-      setPlayCallBack(null);
+      if (shouldClearPlayCallBackOnPop(
+        preservePlayCallBack: preservePlayCallBack,
+      )) {
+        setPlayCallBack(null);
+      }
 
       if (Platform.isAndroid && _playerCount <= 1) {
         _disableAutoEnterPip();
@@ -2486,3 +2494,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     Get.back();
   }
 }
+
+/// 离开视频页时是否应清空静态播放回调。
+///
+/// 应用内小窗是 pop 页面后继续播放的：此时页面 controller 虽已销毁，但
+/// 播放链路仍由小窗会话托管，通知栏/耳机的切集命令必须继续命中同一个
+/// intro controller，所以进入小窗的 pop 要保留回调。其余 pop 路径照旧清空，
+/// 避免按键误触发栈下方已离开的视频页。
+bool shouldClearPlayCallBackOnPop({
+  required bool preservePlayCallBack,
+}) => !preservePlayCallBack;

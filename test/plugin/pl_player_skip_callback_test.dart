@@ -56,4 +56,23 @@ void main() {
     expect(PlPlayerController.skipToNextIfExists(), isNull);
     expect(PlPlayerController.skipToPreviousIfExists(), isNull);
   });
+
+  group('shouldClearPlayCallBackOnPop', () {
+    test('entering in-app PiP keeps the callback for the notification', () {
+      // The video page is popped to start in-app PiP, but playback continues in
+      // the overlay. Clearing the callback here is exactly what made the
+      // notification/headset "next"/"previous" buttons dead while in PiP.
+      expect(
+        shouldClearPlayCallBackOnPop(preservePlayCallBack: true),
+        isFalse,
+      );
+    });
+
+    test('a normal pop still clears the callback', () {
+      expect(
+        shouldClearPlayCallBackOnPop(preservePlayCallBack: false),
+        isTrue,
+      );
+    });
+  });
 }

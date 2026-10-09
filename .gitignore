@@ -149,4 +149,6 @@ pili_release.json
 
 dist
 
+diagnostics/
+
 test*

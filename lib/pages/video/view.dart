@@ -343,6 +343,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       // 本页被 pop 但下层仍是另一个视频页时，播放器单例的 owner 会在
       // didPopNext 中切回可见页面；这里不能再由旧页面去 pause 共享播放器
       pauseOnPop: !_isEnteringPipMode && !returningToVideoPage,
+      // 进入应用内小窗后页面会被销毁，但播放仍在继续，通知栏/耳机的
+      // 上一集/下一集必须继续命中本页的 intro controller，不能在此清掉。
+      preservePlayCallBack: _isEnteringPipMode,
     );
   }
 
